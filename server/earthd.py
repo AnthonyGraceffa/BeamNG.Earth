@@ -1265,12 +1265,15 @@ class Server:
         rmesh = railways.tile_mesh(anchor.frame, tx, ty,
                                    [cell_fn(k) for k in roadsmod.cells_of_tile(anchor.frame, tx, ty, railways.REACH_M)],
                                    railways.point_ground(anchor.frame, elev))
+        import finepatch
+        fmesh = finepatch.tile_mesh(anchor.frame, roadsmod.tile_bbox(tx, ty), drawn,
+                                    lambda la, lo: self.ground(anchor.frame, la, lo, self.dem.sample(la, lo, zoom)))
         bld = None
         if self.buildings:
             bld = buildingsmod.road_tile(anchor.frame, tx, ty, self.mapdata, elev, None, None, items)
         return roadsmod.write_tile(self.out_dir, self.vfs_dir, aid, tx, ty, chunks, walks if self.sidewalks else None,
                                    mesh, dmesh, bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel,
-                                   rail_mesh=rmesh)
+                                   rail_mesh=rmesh, fine_mesh=fmesh)
 
     def set_gas_stations(self, on):
         """The settings page's "Gas stations" switch (the mod's gas_stations; the user, 2026-10-23: off saves their
@@ -1592,6 +1595,9 @@ class Server:
             info["surfaceComplete"] = complete
         if not provisional:
             idx = self._tunnel_holes(anchor, elev, keep, cx, cy, idx, info)
+            idx = blockworker._fine_holes(          # (the road tiles' fine patches fill them: finepatch.py)
+                anchor.frame, lambda la, lo: self.ground(anchor.frame, la, lo, self.dem.sample(la, lo, anchor.hm_zoom)),
+                keep, cx, cy, self.layout.block, idx, info)
         info["ter"], mats = surfacemod.write_ter(self.out_dir, self.ter_name((anchor.id, cx, cy)), keep["qgrid"], idx)
         if mats is not None:          # the .ter's own material list (MATERIALS indices)
             info["mats"] = mats

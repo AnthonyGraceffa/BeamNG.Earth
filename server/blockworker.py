@@ -283,12 +283,29 @@ def build(aid, lat, lon, hm_zoom, q, cx, cy, size, out_dir, name, ter_name=None,
     if ter_name is not None:
         t1 = time.perf_counter()
         idx = _tunnel_holes(aid, frame, elev, keep, cx, cy, idx, info, g)
+        idx = _fine_holes(frame, raw, keep, cx, cy, size, idx, info)
         info["ter"], mats = surfacemod.write_ter(out_dir, ter_name, keep["qgrid"], idx)
         if mats is not None:          # the .ter's own material list (MATERIALS indices)
             info["mats"] = mats
         stages["ter"] = time.perf_counter() - t1
     info["stages"] = stages
     return info
+
+
+def _fine_holes(frame, raw, keep, cx, cy, size, idx, info):
+    """idx with the block's sharp graded cells as holes (finepatch.block_holes: the road tiles' fine patches fill
+    them)."""
+    import finepatch
+    if not finepatch.FINE_ON:
+        return idx
+    xs, ys = heightmap.sample_coords(cx, cy, size)
+    holes = finepatch.block_holes(keep["u"], heightmap.surface_u(frame, raw, xs, ys))
+    if not holes.any():
+        return idx
+    idx = np.zeros(holes.shape, np.uint8) if idx is None else idx
+    idx[holes] = heightmap.TER_HOLE
+    info["fineHoles"] = int(holes.sum())
+    return idx
 
 
 def _bridges(aid, frame, elev):
@@ -436,12 +453,16 @@ def roads_tile(aid, lat, lon, zoom, tx, ty, out_dir, vfs_dir, sidewalks, lift, b
     rmesh = railways.tile_mesh(frame, tx, ty,
                                [cell_fn(k) for k in roadsmod.cells_of_tile(frame, tx, ty, railways.REACH_M)],
                                railways.point_ground(frame, elev))
+    import finepatch
+    fmesh = finepatch.tile_mesh(frame, box, drawn,       # (sharp graded ground: holes in the block, this fills them)
+                                lambda la, lo: ground(frame, la, lo, _s.dem.sample(la, lo, zoom)))
     bld = None
     if buildings:
         import buildings as buildingsmod
         bld = buildingsmod.road_tile(frame, tx, ty, _s.md, elev, None, None, items)
     return roadsmod.write_tile(out_dir, vfs_dir, aid, tx, ty, chunks, walks if sidewalks else None, mesh, dmesh,
-                               bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel, rail_mesh=rmesh) + (fuel_pads,)
+                               bld, props, wires, park, tunnel_mesh=tmesh, fuel=fuel, rail_mesh=rmesh,
+                               fine_mesh=fmesh) + (fuel_pads,)
 
 
 def _with_plazas(mesh, frame, tx, ty, elev, origin, surface):
