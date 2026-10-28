@@ -138,7 +138,11 @@ end
 -- one road mesh the markings showed only while the engine happened to draw them after the asphalt; with
 -- many more translucent objects in view (buildings' windows, signals) they vanished. Opaque asphalt is
 -- drawn first, always, and the translucent lines, crossings and gutters over it.
-M.OPAQUE = { 'road_asphalt_2lane', 'italy_cobblestone' }
+-- Dirt and gravel strips too (server/roads.py LOOK): left translucent, the opacity map kept them in the
+-- same pass as windows and signals and the road vanished with those, the same way the asphalt did.
+M.OPAQUE = { 'road_asphalt_2lane', 'italy_cobblestone',
+  'm_dirt_variation_01', 'm_dirt_variation_02', 'm_dirt_variation_03', 'm_dirt_variation_04',
+  'm_dirt_road_gravels' }
 
 local function loadMaterials()
   if loadedMaterials then return end

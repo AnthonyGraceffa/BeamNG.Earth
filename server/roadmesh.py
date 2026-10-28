@@ -91,7 +91,16 @@ def ribbons(chunks):
         if len(xy) < 2:
             continue
         n = _normals(xy) * (float(c["w"]) / 2)
-        out.append((xy + n, xy - n, s / float(c.get("tl") or 10.0), c["m"], layer_of(c),
+        tl = float(c.get("tl") or 10.0)
+        s0, s1 = c.get("s0"), c.get("s1")
+        # s0/s1: metres along the whole road to this chunk's ends (roads._surface_pieces). Without them v
+        # restarts at every tile, and a dirt strip's ruts break. With them v is that distance over the
+        # texture length, so the same point has the same v on both sides of a tile edge.
+        if s0 is not None and s1 is not None and s[-1] > 1e-9:
+            v = (float(s0) + (float(s1) - float(s0)) * (s / s[-1])) / tl
+        else:
+            v = (float(s0 or 0.0) + s) / tl
+        out.append((xy + n, xy - n, v, c["m"], layer_of(c),
                     z if c.get("fixed") else None))
     return out
 
@@ -234,7 +243,15 @@ def _reach_past(c, box):
         n.insert(0, ends[0][None])
     if ends[1] is not None:
         n.append(ends[1][None])
-    return {**c, "n": np.concatenate(n).tolist()}
+    out = {**c, "n": np.concatenate(n).tolist()}
+    # The extra length is outside the tile. A dirt strip's s0/s1 are metres along the road to the
+    # chunk's old ends: shift them by the same reach, or v is stretched across the extension and the
+    # two tiles disagree at the seam (about 10 m on a 3.5 m track).
+    if ends[0] is not None and c.get("s0") is not None:
+        out["s0"] = float(c["s0"]) - reach
+    if ends[1] is not None and c.get("s1") is not None:
+        out["s1"] = float(c["s1"]) + reach
+    return out
 
 
 GRID_M = 2.0            # the terrain block's square (heightmap.SQUARE): its samples on multiples of it, each square cut
