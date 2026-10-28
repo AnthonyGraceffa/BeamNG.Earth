@@ -272,7 +272,8 @@ class BuildTileTest(unittest.TestCase):
 
     def test_build_clips_and_styles(self):
         f = features([[(-300, 50), (300, 50)], [(100, 10), (100, 200)]], ["primary", "track"])
-        chunks = [c for c in roads.build_tile(FRAME, 0, 0, [f], flat) if c["m"] in {l["m"] for l in roads.LOOK.values()}]
+        surfaces = {l["m"] for l in roads.LOOK.values()} | set(roads.DIRT_VARIATIONS)
+        chunks = [c for c in roads.build_tile(FRAME, 0, 0, [f], flat) if c["m"] in surfaces]
         self.assertEqual(len(chunks), 2, "one surface chunk per road (lines and sidewalks aside)")
         prim = next(c for c in chunks if c["w"] == roads.STYLE["primary"][0] + 2 * roads.EDGE_STRIP_M)
         xs = [n[0] for n in prim["n"]]
@@ -281,7 +282,9 @@ class BuildTileTest(unittest.TestCase):
         self.assertTrue(all(abs(n[1] - 50) < 0.3 for n in prim["n"]), "on its line (the test helper is spherical: ~0.13 m)")
         self.assertEqual(prim["m"], roads.LOOK["paved"]["m"])
         track = next(c for c in chunks if c is not prim)
-        self.assertEqual(track["m"], roads.LOOK["dirt"]["m"])
+        self.assertIn(track["m"], roads.DIRT_VARIATIONS)
+        self.assertAlmostEqual(track["tl"], roads.LOOK["dirt"]["aspect"] * track["w"], places=2)
+        self.assertGreater(track["s1"], track["s0"], "the strip's distance runs along the road")
         self.assertTrue(all(abs(n[2] - 10.0) < 0.05 for n in prim["n"]), "z on the DEM (flat, near the anchor)")
 
     def test_ramps_one_lane_wide(self):
@@ -1139,9 +1142,42 @@ class InGroundTest(unittest.TestCase):
     def test_no_carriageway_mesh_markings_kept(self):
         f = features([[(-300, 50), (300, 50)]], ["primary"])
         chunks = roads.build_tile(FRAME, 0, 0, [f], flat)
-        surfaces = {l["m"] for l in roads.LOOK.values()}
+        surfaces = {l["m"] for l in roads.LOOK.values()} | set(roads.DIRT_VARIATIONS)
         self.assertFalse([c for c in chunks if c["m"] in surfaces], "no carriageway mesh")
         self.assertTrue([c for c in chunks if c["m"] not in surfaces], "its lines stay")
+
+    def test_dirt_and_gravel_keep_a_continuous_strip(self):
+        """Paved roads stay in the photo. A dirt track and a gravel road keep BeamNG's road strip, one variation
+        per road, texture length the strip's aspect times the width, and the run continues into the next tile
+        instead of restarting (s0 is metres along the road, not along the tile)."""
+        dirt = features([[(-20, 40), (600, 40)]], ["track"], ids=["trk"])
+        gravel = features([[(-20, 80), (600, 80)]], ["residential"], surfaces=[(0, "gravel")], ids=["grv"])
+        paved = features([[(-20, 10), (600, 10)]], ["primary"], ids=["pvd"])
+
+        def strips(feats, names):
+            return [c for c in roads.build_tile(FRAME, 0, 0, [feats], flat) if c["m"] in names]
+
+        d0 = strips(dirt, roads.DIRT_VARIATIONS)
+        d1 = [c for c in roads.build_tile(FRAME, 1, 0, [dirt], flat) if c["m"] in roads.DIRT_VARIATIONS]
+        self.assertTrue(d0 and d1)
+        self.assertEqual(d0[0]["m"], d1[0]["m"], "one variation along the whole road")
+        self.assertEqual(roads.look_of(roads.road_specs(dirt)[0], "trk")["m"], d0[0]["m"])
+        self.assertAlmostEqual(d0[0]["tl"], roads.LOOK["dirt"]["aspect"] * d0[0]["w"], places=2)
+        self.assertGreater(d1[0]["s0"], d0[0]["s0"] + 100, "the next tile continues the run")
+        g = strips(gravel, {roads.LOOK["gravel"]["m"]})
+        self.assertTrue(g)
+        self.assertAlmostEqual(g[0]["tl"], roads.LOOK["gravel"]["aspect"] * g[0]["w"], places=2)
+        self.assertFalse(strips(paved, {roads.LOOK["paved"]["m"]}), "a paved road stays in the photo")
+
+        import roadmesh
+        def edge_v(tx):
+            chunks = [c for c in roads.build_tile(FRAME, tx, 0, [dirt], flat) if c["m"] in roads.DIRT_VARIATIONS]
+            x0, y0, x1, y1 = roads.tile_bbox(tx, 0)
+            P, T, UV, mats, M = roadmesh.build(FRAME, chunks, flat, (x0, y0, 0.0), clip=(x0, y0, x1, y1))
+            at = np.abs(P[:, 0] + x0 - roads.TILE) < 0.05
+            self.assertTrue(at.any(), "the strip is cut on the tile edge")
+            return float(np.median(UV[at, 1]))
+        self.assertAlmostEqual(edge_v(0), edge_v(1), delta=0.02, msg="the texture matches across the tile edge")
 
 
 if __name__ == "__main__":
