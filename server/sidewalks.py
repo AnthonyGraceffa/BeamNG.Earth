@@ -47,11 +47,21 @@ V_BAND_TOP, V_LIGHT_LOW, V_BAND_LOW = 1.0 - 1 / 512, 1.0 - 40 / 512, 1.0 - 63 / 
 V_SLAB_IN, V_SLAB_OUT = 1.0 - 0.195, 1.0 - 0.005
 
 
+def _against(P, tris, want):
+    """(m,) bool: the triangles tris (m, 3) of P whose normal points against want (m, 3) or (3,). The cross and dot
+    products written out (np.cross's own formulas, the dot summed x + y + z like (n * want).sum(-1)): np.cross's
+    wrapper was over a third of a road tile's sidewalk mesh (9.6k calls a 9-tile set, 2026-10-25)."""
+    a, b, c = P[tris[:, 0]], P[tris[:, 1]], P[tris[:, 2]]
+    u, v = b - a, c - a
+    u0, u1, u2 = u[..., 0], u[..., 1], u[..., 2]
+    v0, v1, v2 = v[..., 0], v[..., 1], v[..., 2]
+    w = np.broadcast_to(want, u.shape)
+    return (u1 * v2 - u2 * v1) * w[..., 0] + (u2 * v0 - u0 * v2) * w[..., 1] + (u0 * v1 - u1 * v0) * w[..., 2] < 0
+
+
 def _orient(tris, P, want):
     """tris (m, 3) flipped where their normal points against want (m, 3) or (3,)."""
-    a, b, c = P[tris[:, 0]], P[tris[:, 1]], P[tris[:, 2]]
-    n = np.cross(b - a, c - a)
-    flip = (n * want).sum(-1) < 0
+    flip = _against(P, tris, want)
     tris = tris.copy()
     tris[flip] = tris[flip][:, ::-1]
     return tris
@@ -103,6 +113,31 @@ def profile(h=CURB_H, w=2.5, hr=None):
 
 
 NARROW_EDGE_M = 0.05    # m a narrow band's ramp end stays inside its outer edge (profile)
+
+
+def profiles(h, w, hr):
+    """(k, 8, 2): profile(h, w, x) for each curb height x of hr (k,), in one go (the same arithmetic, point by point:
+    the same numbers). A run's sections called profile() once per point. Pure."""
+    hr = np.asarray(hr, np.float64)
+    f = hr / h if h > 0 else np.zeros(len(hr))
+    rr = max(CURB_W + NARROW_EDGE_M, min(RAMP_RUN, w - NARROW_EDGE_M))
+    zr = h + rr * CROSS_SLOPE
+    xp = CURB_W + min(PAD_W, (rr - CURB_W) / 2)
+    top = h + w * CROSS_SLOPE
+    out = np.empty((len(hr), 8, 2))
+    out[:, 0] = (0.0, -SINK)
+    out[:, 1, 0] = BATTER * f
+    out[:, 1, 1] = hr - NOSE * f
+    out[:, 2, 0] = NOSE_W * f
+    out[:, 2, 1] = hr
+    out[:, 3, 0] = CURB_W
+    out[:, 3, 1] = hr
+    out[:, 4, 0] = xp
+    out[:, 4, 1] = hr + (zr - hr) * (xp - CURB_W) / (rr - CURB_W)
+    out[:, 5] = (rr, zr)
+    out[:, 6] = (w, top)
+    out[:, 7] = (w + BACK_RUN * (top + SINK), -SINK)
+    return out
 
 
 # strips: (from profile point, to point, material index, v at from, v at to); material 1 on the
@@ -203,40 +238,60 @@ class Builder:
     def _sections(self, curb, toward_out, w, h, hr):
         """ring (k, 7, 3) of the cross-sections, and the per-point profiles (k, 7, 2)."""
         k = len(curb)
-        prof = np.stack([profile(h, w, float(x)) for x in hr])
+        prof = profiles(h, w, hr)
         ring = np.empty((k, prof.shape[1], 3))
         ring[:, :, :2] = curb[:, None, :2] + toward_out[:, None, :] * prof[:, :, 0:1]
         ring[:, :, 2] = curb[:, None, 2] + prof[:, :, 1]
         return ring - self.origin, prof
 
     def _strips(self, ring, prof, toward_out, s, strips, tactile=None, slab=1):
+        """The quads between the profile points (a, b) of each strip along the run, all strips at once: strip by
+        strip they were ~25 small numpy calls each, 7 strips a run (a road tile's sidewalk mesh was ~20 % of its
+        build). The vertices, triangles and materials come out in the strips' order, with the same numbers."""
         k = len(ring)
-        for a, b, mat, va, vb in strips:
-            rep = CURB_REPEAT_M if mat == 0 else SLAB_REPEAT_M
-            P = np.concatenate([ring[:, a], ring[:, b]])
-            UV = np.concatenate([np.stack([s / rep, np.full(k, va)], 1), np.stack([s / rep, np.full(k, vb)], 1)])
+        S = len(strips)
+        if S == 0:
+            return
+        ia = np.array([st[0] for st in strips])
+        ib = np.array([st[1] for st in strips])
+        mat0 = [st[2] for st in strips]
+        # positions: each strip's a-points then its b-points (k each), strip after strip
+        P = ring[:, np.stack([ia, ib], 1).ravel()].transpose(1, 0, 2).reshape(-1, 3)
+        UV = np.empty((S, 2, k, 2))
+        reps = np.array([CURB_REPEAT_M if m == 0 else SLAB_REPEAT_M for m in mat0])
+        UV[:, :, :, 0] = (s[None, :] / reps[:, None])[:, None, :]
+        UV[:, 0, :, 1] = np.array([st[3] for st in strips])[:, None]
+        UV[:, 1, :, 1] = np.array([st[4] for st in strips])[:, None]
+        mats = np.empty((S, max(k - 1, 0)), np.int64)
+        for j, (a, b, mat, va, vb) in enumerate(strips):
             if mat == 1 and slab == BRICK:      # brick pavers: a tileable texture in world metres
-                UV = np.concatenate([np.stack([s / BRICK_REPEAT_M, prof[:, a, 0] / BRICK_REPEAT_M], 1),
-                                     np.stack([s / BRICK_REPEAT_M, prof[:, b, 0] / BRICK_REPEAT_M], 1)])
+                UV[j, :, :, 0] = s / BRICK_REPEAT_M
+                UV[j, 0, :, 1] = prof[:, a, 0] / BRICK_REPEAT_M
+                UV[j, 1, :, 1] = prof[:, b, 0] / BRICK_REPEAT_M
                 mat = BRICK
-            mats = np.full(k - 1, mat)
+            mats[j] = mat
             if tactile is not None and a == 3:  # the ramp's slope: a tactile pad where lowered
-                mats[tactile] = 2
-                UV = UV.copy()
-                tu = s / TACTILE_REPEAT_M
-                UV[:k, 0] = np.where(np.concatenate((tactile, tactile[-1:])), tu, UV[:k, 0])
-                UV[k:, 0] = np.where(np.concatenate((tactile, tactile[-1:])), tu, UV[k:, 0])
-            base = self._add(P, UV)
-            i = np.arange(k - 1)
-            A, A1, B1, B = base + i, base + i + 1, base + k + i + 1, base + k + i
-            tris = np.concatenate([np.stack([A, B1, A1], 1), np.stack([A, B, B1], 1)])
-            # counter-clockwise seen from outside (dae convention): the profile runs clockwise
-            # (offset out, z up), so an edge's outward normal is its left normal (-dz, doff)
-            dp = 0.5 * ((prof[:-1, b] - prof[:-1, a]) + (prof[1:, b] - prof[1:, a]))
-            o3 = np.concatenate([toward_out[i], np.zeros((k - 1, 1))], 1)
-            want = -dp[:, 1:2] * o3 + dp[:, 0:1] * np.array([0.0, 0.0, 1.0])
-            self.T.append(base + _orient(tris - base, P, np.concatenate([want, want])))
-            self.M.append(np.r_[mats, mats])
+                mats[j, tactile] = 2
+                pad = np.concatenate((tactile, tactile[-1:]))
+                tu = (s / TACTILE_REPEAT_M)[pad]
+                UV[j, 0, pad, 0] = tu
+                UV[j, 1, pad, 0] = tu
+        base = self._add(P, UV.reshape(-1, 2))
+        i = np.arange(max(k - 1, 0))
+        # one strip's triangles in its own numbering (its a-points 0..k-1, b-points k..2k-1)
+        tl = np.concatenate([np.stack([i, k + i + 1, i + 1], 1), np.stack([i, k + i, k + i + 1], 1)])
+        tg = tl[None] + (2 * k * np.arange(S))[:, None, None]      # (S, 2(k-1), 3) into P
+        # counter-clockwise seen from outside (dae convention): the profile runs clockwise
+        # (offset out, z up), so an edge's outward normal is its left normal (-dz, doff)
+        p0, p1 = prof[:-1], prof[1:]
+        dp = 0.5 * ((p0[:, ib] - p0[:, ia]) + (p1[:, ib] - p1[:, ia]))            # (k-1, S, 2)
+        o3 = np.concatenate([toward_out[i], np.zeros((len(i), 1))], 1)
+        want = -dp[:, :, 1:2] * o3[:, None, :] + dp[:, :, 0:1] * np.array([0.0, 0.0, 1.0])
+        want = want.transpose(1, 0, 2)                                              # (S, k-1, 3)
+        flip = _against(P, tg.reshape(-1, 3), np.concatenate([want, want], 1).reshape(-1, 3)).reshape(tg.shape[:2])
+        tg[flip] = tg[flip][:, ::-1]
+        self.T.append(base + tg.reshape(-1, 3))
+        self.M.append(np.concatenate([mats, mats], 1).ravel())
 
     def add_run(self, curb, toward_out, w, h=CURB_H, caps=(True, True), ramps=(), slab=1):
         """One sidewalk run: curb (k, 3) the curb line (z = the road there), toward_out (k, 2) unit
