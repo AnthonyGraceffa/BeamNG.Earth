@@ -304,19 +304,20 @@ class BuildTileTest(unittest.TestCase):
 
         def lanes(cls, urban):
             sp = roads.Spec(roads.carriageway(cls, "paved", urban, None, True), "paved", urban, cls, True, 2.5, 1)
-            n = sum(1 for look, w, line in roads.extras(sp, pts, -100.0) if look is roads.LANE_LINE)
+            n = len({round(float(line[0][1]), 2) for look, w, line in roads.extras(sp, pts, -100.0)
+                     if look.get("kind") == "lane"})
             return n + 1, sp
         n, rural = lanes("motorway", False)
         self.assertEqual(n, 2, "rural motorway carriageway")
         self.assertAlmostEqual(rural.width, roads.MOTORWAY_RURAL_M + 2 * roads.SHOULDER_M)
-        edges = [line[0][1] for look, w, line in roads.extras(rural, pts, -100.0) if look is roads.EDGE_LINE]
+        edges = [line[0][1] for look, w, line in roads.extras(rural, pts, -100.0) if look.get("kind") == "edge"]
         self.assertEqual(sorted(round(abs(y), 2) for y in edges), [round(roads.MOTORWAY_RURAL_M / 2, 2)] * 2,
                          "edge lines between the lanes and the shoulders")
         self.assertEqual(lanes("motorway", True)[0], 3, "urban motorway carriageway")
         self.assertEqual(lanes("trunk", False)[0], 2, "rural divided trunk")
         # a ramp (one lane, LINK_M): its edge lines a lane apart, not inside the motorway's shoulders (GitHub #107)
         ramp = roads.Spec(roads.LINK_M[1], "paved", False, "motorway", True, 2.5, 1)
-        edges = [line[0][1] for look, w, line in roads.extras(ramp, pts, -100.0) if look is roads.EDGE_LINE]
+        edges = [line[0][1] for look, w, line in roads.extras(ramp, pts, -100.0) if look.get("kind") == "edge"]
         self.assertAlmostEqual(abs(edges[0] - edges[1]), roads.LINK_LANE_M, places=2)
 
     def test_divided_trunk_sidewalk_outer_side_only_when_slow(self):
@@ -722,14 +723,22 @@ class BuildTileTest(unittest.TestCase):
         self.assertTrue(np.allclose(o[1], [9, 1, 5]), "mitred corner")
         self.assertEqual(roads.centre_colour(-76.6), "line_yellow")
         self.assertEqual(roads.centre_colour(12.5), "line_white")
-        # the Americas' double yellow line; elsewhere one broken white line (the Gotthard road, 2026-10-18)
+        # the Americas' yellow centre line: double solid in town, broken (MUTCD 10 ft / 30 ft) on a rural two-lane road;
+        # elsewhere one broken white line (the Gotthard road, 2026-10-18), its dashes the country's (DE: 6 m / 12 m)
         sp = roads.Spec(7.0, "paved", False, "primary", False)
         line = np.array([[0.0, 0, 5], [100, 0, 5]])
-        us = [lk for lk, w, ln in roads.extras(sp, line, -76.6) if lk["m"] == "line_yellow"]
-        eu = [lk for lk, w, ln in roads.extras(sp, line, 8.6) if lk["m"] in ("line_white", roads.LANE_LINE["m"])
-              and lk is not roads.EDGE_LINE]
-        self.assertEqual(len(us), 2)
-        self.assertEqual([lk["m"] for lk in eu], [roads.LANE_LINE["m"]])
+        centre = lambda s, lon, c=None: [(lk, ln) for lk, w, ln in roads.extras(s, line, lon, country=c)
+                                         if lk.get("kind") == "centre"]
+        town = centre(sp._replace(urban=True), -76.6, "US")
+        self.assertEqual(len(town), 2)
+        self.assertTrue(all(lk["m"] == "line_yellow" for lk, _ in town))
+        rural = centre(sp, -76.6, "US")
+        self.assertTrue(all(lk["m"] == "line_yellow" for lk, _ in rural))
+        self.assertEqual(len(rural), 9, "a 3.05 m dash every 12.19 m along 100 m")
+        self.assertAlmostEqual(float(rural[0][1][-1][0] - rural[0][1][0][0]), 3.05, places=2)
+        de = centre(sp, 8.6, "DE")
+        self.assertTrue(all(lk["m"] == "line_white" for lk, _ in de))
+        self.assertEqual(len(de), 6, "6 m dashes every 18 m along 100 m")
 
     def test_feature_in_two_cells_once_and_deterministic(self):
         f = features([[(-300, 50), (300, 50)]], ["primary"])
@@ -1212,6 +1221,33 @@ class InGroundTest(unittest.TestCase):
         self.assertLess(float(F[at & inner, 1].max()), 0.6, "a tile edge in the middle of the road stays solid")
 
 
+class NearNodePairsTest(unittest.TestCase):
+    def test_the_grid_gives_the_all_pairs_scans_pairs_in_its_order(self):
+        import math
+        import junctions
+        rng = np.random.default_rng(3)
+        pos = rng.uniform(0.0, 200.0, (500, 2))
+        r = junctions.MERGE_M
+        scan = [(a, b) for a in range(len(pos)) for b in range(a + 1, len(pos))
+                if math.hypot(*(pos[a] - pos[b])) < r]
+        self.assertTrue(scan)
+        self.assertEqual(list(junctions._near_node_pairs(pos, r)), scan)
+
+
+class RingWidthTest(unittest.TestCase):
+    def test_a_mapped_roundabout_is_as_wide_as_the_guides_make_it(self):
+        ring = [(30 * np.cos(a), 30 * np.sin(a)) for a in np.linspace(0, 2 * np.pi, 25)]
+        f = features([ring, ring, [(-100, 80), (100, 80)]], ["residential", "tertiary", "residential"])
+        f.attrs["osm_junction"] = np.array(["roundabout", "roundabout", ""], object)
+        f.attrs["osm_lanes"] = np.array([np.nan, 2.0, np.nan])
+        sp = roads.road_specs(f, lambda la, lo: np.ones(np.shape(la), bool))
+        self.assertAlmostEqual(sp[0].width, roads.RING_LANE_M)
+        self.assertAlmostEqual(sp[1].width, roads.RING_LANE_M + roads.RING_EXTRA_LANE_M)
+        self.assertFalse(sp[0].urban)                   # no parking lanes on the ring
+        self.assertFalse(roads.has_sidewalks(sp[0]))
+        self.assertTrue(sp[2].urban)                    # a street beside it as before
+
+
 if __name__ == "__main__":
     unittest.main()
 
@@ -1307,3 +1343,63 @@ class ChainResolveTest(unittest.TestCase):
                 pool = {("b", 0): pool[("b", 0)], ("a", 0): pool[("a", 0)]}
             self.assertEqual(res._resolve(("a", 0), pool, {}, set()), [("a", 0), ("b", 0)])
             self.assertEqual(float(pool[("b", 0)][1][-1][0]), 300.0)
+
+
+class TunnelReachTest(unittest.TestCase):
+    """GitHub #450: a tunnel's portal inside the carriageway of a road crossing over it moves out past that road."""
+
+    def _ranges(self, lines, classes, flags):
+        return roads.level_ranges(features(lines, classes, flags=flags), 0)
+
+    def test_a_portal_in_a_carriageway_moves_past_it(self):
+        # the tunnel road east-west, 400 m, its tunnel -20 .. +20 m; a motorway crossing at +18 m
+        got = self._ranges([[(-200.0, 0.0), (200.0, 0.0)], [(18.0, -100.0), (18.0, 100.0)]],
+                           ["unclassified", "motorway"], [(0, "is_tunnel", 0.45, 0.55)])
+        (a, b, k), = got
+        self.assertEqual(k, "tunnel")
+        self.assertAlmostEqual(a, 0.45, places=4)                # (the other portal: no road there)
+        half = roads.road_specs(features([[(18.0, -100.0), (18.0, 100.0)]], ["motorway"]))[0].width / 2
+        self.assertGreaterEqual(b * 400.0 - 200.0, 18.0 + half + roads.TUNNEL_PORTAL_CLEAR_M - 0.01)
+
+    def test_a_portal_in_the_lanes_of_a_road_alongside_moves_into_the_tunnel(self):
+        # a service tunnel mapped as a ground stretch in a motorway's lanes, its portal there (the Gotthard road tunnel's
+        # service gallery at Goeschenen): the portal moves in until it is clear of the motorway
+        got = self._ranges([[(-200.0, 0.0), (-40.0, 0.0), (200.0, -80.0)], [(-200.0, 2.0), (-20.0, 2.0)]],
+                           ["service", "motorway"], [(0, "is_tunnel", 0.3, 1.0)])
+        (a, b, k), = got
+        self.assertEqual(k, "tunnel")
+        self.assertGreater(a, 0.3 + 0.01)
+        self.assertAlmostEqual(b, 1.0, places=4)
+        # entirely in its lanes: no tunnel
+        got = self._ranges([[(-200.0, 0.0), (200.0, 0.0)], [(-250.0, 1.0), (250.0, 1.0)]],
+                           ["service", "motorway"], [(0, "is_tunnel", 0.45, 0.5)])
+        self.assertEqual(got, [])
+
+    def test_a_road_away_from_the_portal_or_joined_there_moves_nothing(self):
+        for other in ([(60.0, -100.0), (60.0, 100.0)],     # 40 m outside the portal
+                      [(0.0, -100.0), (0.0, 100.0)],       # over the middle, its carriageway inside
+                      [(21.0, 0.0), (21.0, 100.0)]):       # a side road joining the approach (its end there)
+            got = self._ranges([[(-200.0, 0.0), (200.0, 0.0)], other], ["unclassified", "motorway"],
+                               [(0, "is_tunnel", 0.45, 0.55)])
+            self.assertEqual([(round(a, 4), round(b, 4), k) for a, b, k in got], [(0.45, 0.55, "tunnel")], other)
+
+
+class TunnelCoverRoadsTest(unittest.TestCase):
+    """GitHub #450: a covered tunnel section goes on until the road crossing over it is covered."""
+
+    def test_a_short_arch_grows_under_the_whole_carriageway(self):
+        import fast
+        fast.require(95, "tunnel_cover_roads")
+        s = np.arange(0.0, 72.1, 4.0)
+        xy = np.c_[s, np.zeros_like(s)]
+        kinds = np.zeros(len(s), np.int64)
+        kinds[(s >= 16) & (s <= 24)] = 1                   # an 8 m arch ...
+        road = np.array([[20.0, -50.0], [20.0, 50.0]])     # ... under a road 13 m wide crossing at 20 m
+        out = np.asarray(fast._ef.tunnel_cover_roads(np.ascontiguousarray(xy), s, kinds, road, np.array([0, 2], np.int64),
+                                                     np.array([6.5]), 2.0, 0.35, 15.0, 8.0))
+        covered = s[out > 0]
+        self.assertLessEqual(covered.min(), 20 - 8.5)
+        self.assertGreaterEqual(covered.max(), 20 + 8.5)
+        far = np.asarray(fast._ef.tunnel_cover_roads(np.ascontiguousarray(xy), s, kinds, road + [50.0, 0.0],
+                                                     np.array([0, 2], np.int64), np.array([6.5]), 2.0, 0.35, 15.0, 8.0))
+        np.testing.assert_array_equal(far, kinds)          # a road far from the arch: as it was

@@ -14,9 +14,9 @@ import numpy as np
 
 NAME = "prewarm.cdae"
 # materials the code names at run time, not in a constant the scan below finds
-EXTRA = ("line_yellow", "line_white", "bne_wire",
+EXTRA = ("line_yellow", "line_white", "bne_wire", "bne_cable_steel", "bne_cable_reflector",
          "bne_dirt_variation_01", "bne_dirt_variation_02", "bne_dirt_variation_03", "bne_dirt_variation_04",
-         "bne_dirt_gravel")
+         "bne_dirt_gravel")   # cable: the median barrier (medians.py); dirt: the road strips (roads.py)
 
 
 def _marks(v, out):
@@ -39,7 +39,14 @@ def materials():
     import roadmesh
     import roads
     import sidewalks
+    import exitsigns
+    import mergesigns
+    import milemarkers
+    import speedsigns
     out = set(buildings.MATERIALS) | set(sidewalks.MATERIALS) | set(EXTRA)
+    # the highway signs' (signstream.py)
+    out |= set(exitsigns.GUIDE_MATERIALS) | set(milemarkers.MATERIALS) | set(mergesigns.MATERIALS)
+    out |= set(speedsigns.MATERIALS)
     for mod in (roads, roadmesh, junctions, airportgrade):
         for name, v in vars(mod).items():
             if name.isupper():

@@ -130,6 +130,8 @@ MOD_TO_SERVER = {
     "roads_reset": {},
     # gas stations (gasstations.py; additive): on, sent after every hello
     "gas_stations": {"on": F(bool)},
+    # highway signs (signstream.py; additive): the settings page's switch, sent after every hello and when changed
+    "highway_signs": {"on": F(bool)},
     "map_tiles": {"tiles": F(list)},       # the world map's basemap tiles as files (settings.mapTiles)
     "geocode": {"id": F(int), "q": F(str), "lat": F(NUM, OPT), "lon": F(NUM, OPT)},   # the map's search box
     "route": {"id": F(int), "lat0": F(NUM), "lon0": F(NUM), "lat1": F(NUM), "lon1": F(NUM),
@@ -468,7 +470,8 @@ class CacheAgreementTest(unittest.TestCase):
         values = re.findall(r"'(\w+)'", m.group(2))
         self.assertEqual((m.group(1), values), ("20", ["5", "10", "20", "50", "unlimited"]))
         self.assertEqual(float(m.group(1)), cachemod.DEFAULT_CAP_GB, "the page's default is the server's")
-        page = (LUA.parents[3] / "ui" / "ui-vue" / "mods" / "beamngEarth" / "EarthSettings.vue").read_text(encoding="utf-8")
+        # (the settings pages' schema and state: earthSettingsStore.js, since the pause-menu tab, 2026-10-28)
+        page = (LUA.parents[3] / "ui" / "ui-vue" / "mods" / "beamngEarth" / "earthSettingsStore.js").read_text(encoding="utf-8")
         row = re.search(r'\{ id: "cacheCapGb", type: "select", default: "(\w+)".*?options: \[(.*?)\] \}', page, re.S)
         self.assertEqual(row.group(1), m.group(1))
         self.assertEqual(re.findall(r'value: "(\w+)"', row.group(2)), values)

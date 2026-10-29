@@ -833,6 +833,8 @@ local function onMessage(msg)
     if settings and settings.cacheCapGb then net.send({ type = 'cache', capGb = settings.cacheCapGb() }) end
     -- gas stations on, after every hello (a server started without them too; this comes before any tile request)
     net.send({ type = 'gas_stations', on = true })
+    -- the highway signs' switch (settings highwaySigns): no sign tiles built while it is off
+    net.send({ type = 'highway_signs', on = roads.signsEnabled })
     -- the on-screen credits: this session's own follow (the attribution line until then)
     credits.clear()
     -- M4: the terrain block size first (everything below may use the lattice / follow table); a
@@ -1705,6 +1707,8 @@ local function mark(name, t0)
   marks[name] = (marks[name] or 0) + (t - t0)
   return t
 end
+-- The mod's parts' ms in the last whole frame (diagnostics: a per-frame probe; not to be changed by the caller)
+function M.frameMarks() return prevMarks end
 local function noteHitch(frameMs)
   local h = { ms = math.floor(frameMs + 0.5), at = math.floor(st.clock * 10 + 0.5) / 10, mod = {} }
   -- marks: the mod's parts in the frame that just ended (onUpdate swaps them to prevMarks after this call; reading
@@ -2470,6 +2474,10 @@ end
 -- The Roads setting: off removes them; on again asks the server to send the tiles once more.
 function M.setRoadsEnabled(on)
   if roads.setEnabled(on) then net.send({ type = 'roads_reset' }) end
+end
+-- The highway signs on / off (settings highwaySigns): shown or hidden at once, built by the server only while on.
+function M.setHighwaySigns(on)
+  if roads.setSignsEnabled(on) then net.send({ type = 'highway_signs', on = roads.signsEnabled }) end
 end
 
 M.onUpdate = onUpdate
