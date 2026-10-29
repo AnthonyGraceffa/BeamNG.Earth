@@ -1173,11 +1173,43 @@ class InGroundTest(unittest.TestCase):
         def edge_v(tx):
             chunks = [c for c in roads.build_tile(FRAME, tx, 0, [dirt], flat) if c["m"] in roads.DIRT_VARIATIONS]
             x0, y0, x1, y1 = roads.tile_bbox(tx, 0)
-            P, T, UV, mats, M = roadmesh.build(FRAME, chunks, flat, (x0, y0, 0.0), clip=(x0, y0, x1, y1))
+            mesh = roadmesh.build(FRAME, chunks, flat, (x0, y0, 0.0), clip=(x0, y0, x1, y1))
+            P, T, UV, mats, M = mesh[:5]
             at = np.abs(P[:, 0] + x0 - roads.TILE) < 0.05
             self.assertTrue(at.any(), "the strip is cut on the tile edge")
             return float(np.median(UV[at, 1]))
         self.assertAlmostEqual(edge_v(0), edge_v(1), delta=0.02, msg="the texture matches across the tile edge")
+
+    def test_dirt_ribbon_fades_its_sides_and_its_ends(self):
+        """The sides of a dirt strip are clear and the centre is solid, and a real end fades out. A tile edge in
+        the middle of the road does not: the run continues into the next tile."""
+        import roadmesh
+        road = features([[(20, 40), (220, 40)]], ["track"], ids=["fade"])
+        chunks = [c for c in roads.build_tile(FRAME, 0, 0, [road], flat) if c["m"] in roads.DIRT_VARIATIONS]
+        x0, y0, x1, y1 = roads.tile_bbox(0, 0)
+        mesh = roadmesh.build(FRAME, chunks, flat, (x0, y0, 0.0), clip=(x0, y0, x1, y1))
+        P, UV, F = mesh[0], mesh[2], mesh[5]
+        wx = P[:, 0] + x0
+        outer = (UV[:, 0] < 0.02) | (UV[:, 0] > 0.98)
+        inner = (UV[:, 0] > 0.2) & (UV[:, 0] < 0.8)
+        mid = (wx > 80) & (wx < 160)
+        self.assertLess(float(np.minimum(F[outer & mid, 0], 1.0 - F[outer & mid, 0]).max()), 0.05,
+                         "the sides sample the clear edge of the fade")
+        self.assertLess(float(np.abs(F[inner & mid, 0] - 0.5).max()), 0.05, "the centre samples the solid texel")
+        self.assertGreater(float(F[inner & mid, 1].min()), 0.4, "the middle of the road is past the end fade")
+        self.assertLess(float(F[wx < 22, 1].max()), 0.1, "the start of the road samples the clear end")
+        self.assertGreater(float(F[wx > 218, 1].min()), 0.9, "the end of the road samples the clear end")
+
+        onward = features([[(-20, 40), (600, 40)]], ["track"], ids=["on"])
+        x0, y0, x1, y1 = roads.tile_bbox(1, 0)
+        mesh = roadmesh.build(FRAME, [c for c in roads.build_tile(FRAME, 1, 0, [onward], flat)
+                                       if c["m"] in roads.DIRT_VARIATIONS],
+                               flat, (x0, y0, 0.0), clip=(x0, y0, x1, y1))
+        P, UV, F = mesh[0], mesh[2], mesh[5]
+        at = np.abs(P[:, 0] + x0 - roads.TILE) < 0.5
+        inner = (UV[:, 0] > 0.2) & (UV[:, 0] < 0.8)
+        self.assertGreater(float(F[at & inner, 1].min()), 0.4, "a tile edge in the middle of the road stays solid")
+        self.assertLess(float(F[at & inner, 1].max()), 0.6, "a tile edge in the middle of the road stays solid")
 
 
 if __name__ == "__main__":

@@ -29,7 +29,8 @@ M.MATERIAL_FILES = { '/levels/west_coast_usa/art/road/main.materials.json',
   '/levels/italy/art/shapes/buildings/main.materials.json',        -- italy_cobblestone (paving stones)
   '/levels/driver_training/art/road/main.materials.json',          -- m_metal_grid_drain (storm drains)
   '/levels/gridmap_v2/art/shapes/grid/main.materials.json',        -- m_gm_concrete_plain (concrete streets)
-  '/levels/beamng_earth/art/shapes/beamngEarth/buildings.materials.json' }  -- buildings (server/buildings.py)
+  '/levels/beamng_earth/art/shapes/beamngEarth/buildings.materials.json',  -- buildings (server/buildings.py)
+  '/levels/beamng_earth/art/shapes/beamngEarth/dirtroad.materials.json' }  -- dirt and gravel strips (server/roads.py)
 M.FADE = '450 150'          -- distanceFade: start, range (m)
 M.enabled = true
 -- be:reloadCollision() at most this often: every rebuild is a ~20 ms physics frame (2026-10-13, the
@@ -138,11 +139,10 @@ end
 -- one road mesh the markings showed only while the engine happened to draw them after the asphalt; with
 -- many more translucent objects in view (buildings' windows, signals) they vanished. Opaque asphalt is
 -- drawn first, always, and the translucent lines, crossings and gutters over it.
--- Dirt and gravel strips too (server/roads.py LOOK): left translucent, the opacity map kept them in the
--- same pass as windows and signals and the road vanished with those, the same way the asphalt did.
-M.OPAQUE = { 'road_asphalt_2lane', 'italy_cobblestone',
-  'm_dirt_variation_01', 'm_dirt_variation_02', 'm_dirt_variation_03', 'm_dirt_variation_04',
-  'm_dirt_road_gravels' }
+-- Dirt and gravel stay translucent on purpose (dirtroad.materials.json): an opacity map on their second
+-- uv feathers the sides and the ends into the ground. Asphalt and cobble stay opaque so the lines always
+-- draw over them.
+M.OPAQUE = { 'road_asphalt_2lane', 'italy_cobblestone' }
 
 local function loadMaterials()
   if loadedMaterials then return end

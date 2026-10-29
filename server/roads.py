@@ -96,15 +96,18 @@ BUILT = {"paved", "cobble"}
 # m_dirt_road_gravels is the gravel strip (1024 x 2048): textureLength twice the width, as there.
 # "aspect" is that ratio (texture length per metre of width). "vary": one road keeps one of these for
 # its whole length (look_of), so the strip does not change material at a tile edge.
-DIRT_VARIATIONS = ("m_dirt_variation_01", "m_dirt_variation_02",
-                   "m_dirt_variation_03", "m_dirt_variation_04")
+# Copies of those strips (dirtroad.materials.json): the stock opacity maps are patchy, and vertex alpha
+# only tints the colour (it never changes opacity). Ours sample dirt_fade_o.data.png on UV1, which feathers
+# both sides (roadmesh EDGE_FADE_M) and fades a real end (END_FADE_M) without restarting at a tile edge.
+DIRT_VARIATIONS = ("bne_dirt_variation_01", "bne_dirt_variation_02",
+                   "bne_dirt_variation_03", "bne_dirt_variation_04")
 LOOK = {
     "paved": {"m": "road_asphalt_2lane", "tl": 11.0, "p": 20},
     # Italy's cobblestone (a mesh material with groundType COBBLESTONE): a DecalRoad stretches its
     # texture across the whole width, so cobbled roads are drawn as parallel strips of about
     # "strip" m with a square texture repeat, which keeps the stones their size
     "cobble": {"m": "italy_cobblestone", "tl": 2.5, "p": 20, "strip": 2.5},
-    "gravel": {"m": "m_dirt_road_gravels", "tl": 8.0, "p": 21, "aspect": 2.0},
+    "gravel": {"m": "bne_dirt_gravel", "tl": 8.0, "p": 21, "aspect": 2.0},
     "dirt": {"m": DIRT_VARIATIONS[0], "tl": 56.0, "p": 21, "aspect": 16.0, "vary": DIRT_VARIATIONS},
 }
 # a `surface=concrete` street is still a paved one (markings, widths, the tyres' asphalt feel) but is drawn with
@@ -4441,6 +4444,7 @@ def _surface_pieces(look, width, line, box):
                 a, b = _arc_at(simp, sal, c[0]), _arc_at(simp, sal, c[-1])
                 ch["s0"] = round(base + (end - base) * (a / span), 2)
                 ch["s1"] = round(base + (end - base) * (b / span), 2)
+                ch["slen"] = round(float(arc[-1]), 2)   # the whole road: the strip fades at its real ends
             out.append(ch)
     return out
 
