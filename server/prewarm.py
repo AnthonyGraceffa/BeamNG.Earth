@@ -15,8 +15,8 @@ import numpy as np
 NAME = "prewarm.cdae"
 # materials the code names at run time, not in a constant the scan below finds
 EXTRA = ("line_yellow", "line_white", "bne_wire",
-         "m_dirt_variation_01", "m_dirt_variation_02", "m_dirt_variation_03", "m_dirt_variation_04",
-         "m_dirt_road_gravels")
+         "bne_dirt_variation_01", "bne_dirt_variation_02", "bne_dirt_variation_03", "bne_dirt_variation_04",
+         "bne_dirt_gravel")
 
 
 def _marks(v, out):
