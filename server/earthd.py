@@ -244,6 +244,7 @@ ROUTE_DOWNLOAD_MODES = ("off", "ahead", "route")
 ROUTE_WHOLE_MAX_M = 500000.0
 ROUTE_RETRY_S = 2.0               # a deferred tile/cell backs off this long before the next one in the corridor
 FAST_BASE_V = 70.0              # m/s (157 mph): faster, a block waits at most BASE_FAST_WAIT_S for its photo after its
+SMALL_FAST_BASE_V = 35.0        # m/s (78 mph): FAST_BASE_V on a small machine (budget.small: a Steam Deck)
 BASE_FAST_WAIT_S = 0.15         # heights, then goes without it (block_base later): blocks took 0.6-3 s at 600 mph on a
                                 # Steam Deck, mostly the photo (heights 0.1-0.4 s), and the game paused 11 times a minute
 QUICK_BASE_PX = 512             # a block's stand-in photo (write_quick_base): the imagery alone, 2 m texels
@@ -6174,6 +6175,13 @@ def main():
     game_cpus = server_cpus = None
     small = budget.apply()
     if small:
+        # ... and "fast" (FAST_BASE_V: prefetched blocks without their photo until used, the chain ahead) from a lower
+        # speed: at 87 mph a Steam Deck's server drew a full ground photo for every block (several CPU-s each) and the
+        # road collision fell behind the car (2026-10-30)
+        global FAST_BASE_V
+        FAST_BASE_V = SMALL_FAST_BASE_V
+    if os.environ.get("BNGE_FAST_BASE_V"):     # (A/B: FAST_BASE_V in m/s)
+        globals()["FAST_BASE_V"] = float(os.environ["BNGE_FAST_BASE_V"])
         # a small machine (a Steam Deck): fewer worker processes, each with smaller caches (budget.py), where the
         # player left the defaults
         if args.road_processes == ROAD_PROCESSES:
