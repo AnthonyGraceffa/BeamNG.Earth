@@ -159,7 +159,9 @@ POLICIES = {
                                     allow_prefetch=True, offline_ok=True, miss_ttl=30 * DAY,
                                     binary=True, timeout=60.0, max_attempts=2, base_delay=2.0,
                                     breaker_threshold=6, breaker_window=120.0),
-    "tiles.maps.eox.at": HostPolicy(rate=10.0, burst=40.0, max_conc=6, daily_budget=30000,
+    # (20/s, 12 at once: the user's OK 2026-10-30; at 10/s a first visit's far field outside the US took ~4 min, 761
+    # tiles in 241 s at Canterbury; s2maps-tiles.eu, EOX's other domain, refuses us: no mirror)
+    "tiles.maps.eox.at": HostPolicy(rate=20.0, burst=80.0, max_conc=12, daily_budget=30000,
                                     allow_prefetch=True, offline_ok=True, miss_ttl=90 * DAY, **TILE_HOST),
     # (a tile not in Cloudflare's edge cache takes ~1 s before its first byte: requests in flight set the rate)
     "tiles.mapterhorn.com": HostPolicy(rate=50.0, burst=200.0, max_conc=32, daily_budget=80000,
