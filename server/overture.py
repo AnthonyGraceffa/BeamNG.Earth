@@ -54,6 +54,7 @@ REMOTE_FILES = 32               # open RemoteFiles kept (their blocks share rang
 # query needs in parallel first, so DuckDB reads lazily from the block cache
 PARQUET_CONFIG = {"disable_parquet_prefetching": True}
 RG_DIR = "rows"                 # the row groups' local copies (Reader._local_rows), beside a file's blocks
+RG_ROWS = 2048                  # rows a row group of a local copy: a cell's bbox filter skips the others by their stats
 RG_WAIT_S = 60.0                # a copy another process makes is waited for this long
 META_FILE = "rowgroups.json"     # a file's parsed row groups, beside its cached blocks (_meta_load)
 BOX_ROWS = 2_000_000           # row groups' bbox rows kept per Reader (_plan: ~16 B a row as float32)
@@ -603,7 +604,7 @@ class Reader:
                         os.makedirs(d, exist_ok=True)
                         tmp = f"{f}.{os.getpid()}.{threading.get_ident()}.tmp"
                         con.execute(f"""COPY (SELECT {proj} FROM read_parquet('{_q(u)}', file_row_number = true)
-                            WHERE file_row_number BETWEEN {int(a)} AND {int(b)}) TO '{_q(tmp)}' (FORMAT parquet)""")
+                            WHERE file_row_number BETWEEN {int(a)} AND {int(b)}) TO '{_q(tmp)}' (FORMAT parquet, ROW_GROUP_SIZE {RG_ROWS})""")
                         os.replace(tmp, f)
                     finally:
                         if mine:
