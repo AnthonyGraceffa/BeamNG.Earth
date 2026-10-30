@@ -51,6 +51,7 @@ REMOTE_FILES = 32               # open RemoteFiles kept (their blocks share rang
 # DuckDB's own prefetching reads whole row groups one after the other; Reader._plan fetches what the
 # query needs in parallel first, so DuckDB reads lazily from the block cache
 PARQUET_CONFIG = {"disable_parquet_prefetching": True}
+META_FILE = "rowgroups.json"     # a file's parsed row groups, beside its cached blocks (_meta_load)
 BOX_ROWS = 2_000_000           # row groups' bbox rows kept per Reader (_plan: ~16 B a row as float32)
 FETCH_THREADS = 8               # parallel range requests per Reader (Overture's hosts allow 8 at once each)
 FOOTER_GUESS = 256 * 1024       # bytes read from a file's end first for its footer (one block)
@@ -302,6 +303,31 @@ class Reader:
             self._remotes.move_to_end(key)
             return r
 
+    @staticmethod
+    def _meta_load(remote):
+        """A file's parsed row groups kept beside its blocks (_meta_save), or None. (0.15 s a file in each of the
+        server's processes, ~10-20 files a new place's layers.)"""
+        try:
+            with open(os.path.join(remote.cache_dir, META_FILE), encoding="utf-8") as f:
+                return {int(rg): {"first": g["first"], "n": g["n"],
+                                  "bbox": {k: tuple(v) for k, v in g["bbox"].items()},
+                                  "cols": {k: [tuple(r) for r in v] for k, v in g["cols"].items()}}
+                        for rg, g in json.load(f).items()}
+        except (OSError, ValueError, KeyError, TypeError, AttributeError):
+            return None
+
+    @staticmethod
+    def _meta_save(remote, pg):
+        try:
+            os.makedirs(remote.cache_dir, exist_ok=True)
+            path = os.path.join(remote.cache_dir, META_FILE)
+            tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump({str(rg): g for rg, g in pg.items()}, f)
+            os.replace(tmp, path)
+        except (OSError, TypeError, ValueError, AttributeError) as e:
+            log.debug("overture: row groups not saved: %s", e)
+
     def _box_get(self, k):
         with self._lock:
             got = self._boxes.get(k)
@@ -441,6 +467,12 @@ class Reader:
         uris = ", ".join(f"'{proto}://{p}'" for p in paths)
         with self._lock:
             new = [p for p in paths if p not in self._meta]
+        for p in list(new):             # parsed by another process or an earlier run (release files never change)
+            pg = self._meta_load(files[p])
+            if pg is not None:
+                with self._lock:
+                    self._meta[p] = pg
+                new.remove(p)
         if new:
             meta = con.execute(f"""SELECT file_name, row_group_id, row_group_num_rows, path_in_schema, stats_min,
                 stats_max, dictionary_page_offset, data_page_offset, total_compressed_size
@@ -463,6 +495,8 @@ class Reader:
                 g["cols"].setdefault(top, []).append((min(offs), min(offs) + size))
                 if top == "bbox":
                     g["bbox"][leaf] = (smin, smax)
+            for p in new:
+                self._meta_save(files[p], parsed.get(p, {}))
             with self._lock:
                 for p in new:
                     self._meta[p] = parsed.get(p, {})
