@@ -504,6 +504,7 @@ class ServerTest(ServerHarness):
             return self.conn().focus
         self.assertEqual(asyncio.run_coroutine_threadsafe(commit(), self.loop).result(10), (12288.0, -4096.0))
 
+    @mock.patch.object(earthd, "HM_CACHE", 6)     # (the eviction rule, at the cache size it was written for)
     def test_fresh_terrain_survives_eviction_after_rebase(self):
         """Regression (integration drive, 2026-10-10): after a rebase the protected heightmaps (the
         last three committed, the last two sent, every recent anchor's first terrain) outnumbered
@@ -605,6 +606,7 @@ class ServerTest(ServerHarness):
                    and not os.path.exists(os.path.join(self.server.out_dir, os.path.basename(m["shape"])))]
         self.assertEqual(missing, [])
 
+    @mock.patch.object(earthd, "HM_CACHE", 6)     # (the eviction rule, at the cache size it was written for)
     def test_heightmap_cleanup_and_errors(self):
         c = self.c
         self.hello()

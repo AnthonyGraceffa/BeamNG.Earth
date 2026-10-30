@@ -787,6 +787,7 @@ class Server:
         self.hm_stage = {}              # terrain key -> what its build waits on now (the stuck log, prepare_terrain)
         self.ter_serial = itertools.count()
         self.base_stale = set()         # blocks whose base photo lacks lazy imagery (NAIP) still to come
+        self.base_skipped = set()      # blocks built without their photo (a fast player's prefetch: base_refresh)
         self.pads_rebuild = set()       # blocks built without gas station pads that lie on them (pads_stale)
         self.roads_rebuild = set()      # blocks built before every road cell under them was on disk (roads_refresh)
         self.pads_changed_at = 0.0      # (time.monotonic) the last new pad: Connection.pads_refresh waits a little
@@ -1917,6 +1918,12 @@ class Server:
         fb, base = anchor.first_base, None
         if fb is not None and fb[0] == (cx, cy):        # the provisional first block's photo (make_provisional)
             anchor.first_base, base = None, fb[1]
+        elif self.near_visual == "detail" and self.imagery is not None and lane == LANE_PREFETCH and self.fast:
+            # a fast player's prefetched block: its photo only once the mod has it (base_refresh: a stale base); a
+            # 3-8 s photo for every guessed block, half of them never asked for, took the CPU the road tiles needed
+            # (500 mph, 2026-10-30)
+            self.base_stale.add((anchor.id, cx, cy))
+            self.base_skipped.add((anchor.id, cx, cy))
         elif self.near_visual == "detail" and self.imagery is not None:
             base = (self.urgent_base_pool if lane == LANE_REQUEST else self.base_pool).submit(
                 self._base_photo, anchor, cx, cy, self._base_process(lane), lane == LANE_REQUEST)
@@ -4013,6 +4020,7 @@ class Connection:
                 m["farGeo"] = buildingsmod.FAR_GEO
             # ... and the far field's levels from 3 up as global tiles when it places those (hello.globalFar:
             # farfield.lua's GLOBAL_FAR; geotiles phase 3b, --global-far): built once, kept across rebases
+            self.ready_set = msg.get("readySet") == 1      # (the mod takes 'terrain_ready_set': follow.preferReady)
             self.global_far = (geo and msg.get("globalFar") == farfield.GLOBAL_PROTO and bool(self.s.global_far)
                                and self.s.layout.mesh)
             if self.global_far:
@@ -4714,7 +4722,8 @@ class Connection:
         anchor = s.anchors.get(aid)
         cands = [k for k in list(s.hm_committed)[-1:] + list(s.hm_sent)[-1:] if k in s.base_stale and k[0] == aid]
         size = s.layout.block * heightmap.SQUARE
-        key = next((k for k in cands if k in s.hm and s.base_ready(anchor, k[1], k[2])), None)
+        # (a skipped photo (a fast player's prefetched block): at once, its imagery is fetched as it renders)
+        key = next((k for k in cands if k in s.hm and (k in s.base_skipped or s.base_ready(anchor, k[1], k[2]))), None)
         if key is None:
             return
         self.base_busy = True
@@ -4733,9 +4742,11 @@ class Connection:
                 log.info("base photo of %s rendered again with its NAIP (%s)", key, name)
                 self.send({"type": "block_base", "anchorId": key[0], "cx": key[1], "cy": key[2],
                            "base": f"{s.vfs_dir}/{name}", "baseSize": size})
+                s.base_skipped.discard(key)
             except Exception:
                 log.exception("base photo refresh %s", key)
                 s.base_stale.discard(key)
+                s.base_skipped.discard(key)
             finally:
                 self.base_busy = False
         self.spawn(run())
@@ -4990,8 +5001,8 @@ class Connection:
         the player (the mod asks for one of them instead of its own target when it is close: follow.preferReady), when
         that set changed."""
         aid = self.active
-        if aid is None:
-            return
+        if aid is None or not self.s.fast or not getattr(self, "ready_set", False):   # (at speed: there the guesses
+            return                                                                  # miss; a mod that takes it)
         px, py = self.focus
         cs = sorted((cx, cy) for (a, cx, cy) in list(self.s.hm) if a == aid
                     and max(abs(cx - px), abs(cy - py)) <= READY_SET_M)
