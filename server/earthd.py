@@ -1988,12 +1988,17 @@ class Server:
         c0 = time.thread_time()
 
         grade_s = [0.0, 0.0]            # wall, this thread's CPU (the rest: waiting for map data, the interpreter)
+        part_s = {"dem": 0.0, "sea": 0.0, "tunnels": 0.0}  # (the rest of "heights": the stages' log, 2026-10-30)
 
         def elev(la, lo):
+            t1 = time.perf_counter()
             z = self.dem.sample(la, lo, anchor.hm_zoom, progress)
+            part_s["dem"] += time.perf_counter() - t1
             if provisional:             # the runways only (the sea floor waits on the water cells)
                 return self.airports.apply(la, lo, z) if self.airports is not None else z
+            t1 = time.perf_counter()
             z = self.ground(anchor.frame, la, lo, z)
+            part_s["sea"] += time.perf_counter() - t1
             if g is None:
                 return z
             t1, c1 = time.perf_counter(), time.thread_time()
@@ -2002,10 +2007,14 @@ class Server:
             grade_s[1] += time.thread_time() - c1
             return z
         gen = elev
+        if not provisional:
+            blockworker.plan_ahead(g, anchor.frame, cx, cy, self.layout.block * heightmap.SQUARE / 2)
         if self.mapdata is not None and not provisional:
             # (made here when not yet: an anchor's first block was built before any road tile made them, without
             # its arches' raise and flat mouths, 2026-10-17)
+            t1 = time.perf_counter()
             tun = self.tunnels_of(anchor, elev, g)
+            part_s["tunnels"] += time.perf_counter() - t1
             half = self.layout.block * heightmap.SQUARE / 2
             cell_fn = lambda key: self.mapdata.cell(key, layers=("roads",), kind="demand").layers.get("roads")  # noqa: E731
 
@@ -2017,7 +2026,7 @@ class Server:
                                   size=self.layout.block, keep=keep, chunks=None if provisional else anchor.chunks,
                                   ground_at=ground_at)
         stages = {"heights": time.perf_counter() - t0, "grading": grade_s[0], "gradingCpu": grade_s[1],
-                  "heightsCpu": time.thread_time() - c0}
+                  "heightsCpu": time.thread_time() - c0, **part_s}
         idx = None
         if self.surface is not None:
             # ground models per 2 m sample from the cached land cover and the slope (surface.py);

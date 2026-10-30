@@ -51,6 +51,7 @@ REMOTE_FILES = 32               # open RemoteFiles kept (their blocks share rang
 # DuckDB's own prefetching reads whole row groups one after the other; Reader._plan fetches what the
 # query needs in parallel first, so DuckDB reads lazily from the block cache
 PARQUET_CONFIG = {"disable_parquet_prefetching": True}
+BOX_ROWS = 2_000_000           # row groups' bbox rows kept per Reader (_plan: ~16 B a row as float32)
 FETCH_THREADS = 8               # parallel range requests per Reader (Overture's hosts allow 8 at once each)
 FOOTER_GUESS = 256 * 1024       # bytes read from a file's end first for its footer (one block)
 MERGE_GAP = 64 * 1024           # column chunks closer than this are fetched in one range
@@ -282,6 +283,8 @@ class Reader:
         # files never change). Re-reading it for every cell was most of a map cell's CPU (the Deck's mapdata-layer
         # thread, 36 CPU-s of a teleport, 2026-10-23); osmtags._groups keeps its file's the same way.
         self._meta = OrderedDict()
+        self._boxes = OrderedDict()     # (path, row group) -> its rows' bbox (x0, x1, y0, y1) arrays (_plan)
+        self._box_rows = 0
 
     def close(self):
         self.pool.shutdown(wait=False)
@@ -298,6 +301,23 @@ class Reader:
                     self._remotes.popitem(last=False)
             self._remotes.move_to_end(key)
             return r
+
+    def _box_get(self, k):
+        with self._lock:
+            got = self._boxes.get(k)
+            if got is not None:
+                self._boxes.move_to_end(k)
+            return got
+
+    def _box_put(self, k, arrays):
+        with self._lock:
+            if k in self._boxes:
+                return
+            self._boxes[k] = arrays
+            self._box_rows += len(arrays[0])
+            while self._box_rows > BOX_ROWS and len(self._boxes) > 1:
+                _, old = self._boxes.popitem(last=False)
+                self._box_rows -= len(old[0])
 
     def _connect(self, files, kind):
         """A DuckDB connection whose filesystem serves `files` ({path: RemoteFile}) with `kind`."""
@@ -469,26 +489,38 @@ class Reader:
         t1 = time.perf_counter()
         if not cand:
             return []
-        wanted = {}
-        for path, rg in cand:
-            wanted.setdefault(path, []).extend(groups[(path, rg)]["cols"].get("bbox", []))
-        self._fetch(files, wanted, kind)
-        bbox = (f"bbox.xmin <= {lon1!r} AND bbox.xmax >= {lon0!r} AND "
-                f"bbox.ymin <= {lat1!r} AND bbox.ymax >= {lat0!r}")
-        hits = con.execute(f"""SELECT DISTINCT filename, file_row_number FROM read_parquet([{uris}],
-            filename = true, file_row_number = true) WHERE {bbox}""").fetchall()
-        firsts = {}
-        for (path, rg), g in sorted(groups.items()):
-            firsts.setdefault(path, []).append((g["first"], rg))
-        rows_of = {}
-        for fname, row in hits:
-            rows_of.setdefault(fname, []).append(row)
+        # each row group's boxes decoded once (BOX_ROWS kept): a place's cells share their row groups (a fresh
+        # place's first block: 69 queries over 210 row groups of 19, 2026-10-30), and the bbox pass was ~13 s of its
+        # layer threads; compared in the column's own type, as DuckDB compares it
+        need = [k for k in cand if self._box_get(k) is None]
+        if need:
+            wanted = {}
+            for path, rg in need:
+                wanted.setdefault(path, []).extend(groups[(path, rg)]["cols"].get("bbox", []))
+            self._fetch(files, wanted, kind)
+            by_path = {}
+            for path, rg in need:
+                by_path.setdefault(path, []).append(rg)
+            for path, rgs in by_path.items():   # (a file at a time, by row number only: DuckDB skips the other row
+                # groups then; with the files' names in the filter it read every row group's boxes, block by block)
+                only = " OR ".join(f"file_row_number BETWEEN {groups[(path, rg)]['first']} AND "
+                                   f"{groups[(path, rg)]['first'] + groups[(path, rg)]['n'] - 1}" for rg in rgs)
+                got = con.execute(f"""SELECT file_row_number, bbox.xmin AS x0, bbox.xmax AS x1, bbox.ymin AS y0,
+                    bbox.ymax AS y1 FROM read_parquet('{proto}://{path}', file_row_number = true)
+                    WHERE {only}""").fetchnumpy()
+                fr = np.asarray(got["file_row_number"], np.int64)
+                cols = [np.ma.filled(np.ma.asarray(got[c]).astype(np.float64), np.nan).astype(np.asarray(got[c]).dtype)
+                        for c in ("x0", "x1", "y0", "y1")]
+                for rg in rgs:
+                    g = groups[(path, rg)]
+                    sel = (fr >= g["first"]) & (fr < g["first"] + g["n"])
+                    self._box_put((path, rg), tuple(c[sel] for c in cols))
         matched = set()
-        for fname, rows in rows_of.items():     # (each file's rows at once: one search per hit was ~0.1 s a cell)
-            path = fname.split("://", 1)[-1]
-            rgs = firsts[path]
-            ks = np.searchsorted(np.array([f for f, _ in rgs]), np.asarray(rows), side="right") - 1
-            matched.update((path, rgs[int(k)][1]) for k in np.unique(ks))
+        for k in cand:
+            x0, x1, y0, y1 = self._box_get(k)
+            t = x0.dtype.type
+            if np.any((x0 <= t(lon1)) & (x1 >= t(lon0)) & (y0 <= t(lat1)) & (y1 >= t(lat0))):
+                matched.add(k)
         used = set(re.findall(r"[A-Za-z_]+", spec["cols"] + " " + spec.get("extra", ""))) | BASE_COLUMNS
         wanted = {}
         for path, rg in sorted(matched):

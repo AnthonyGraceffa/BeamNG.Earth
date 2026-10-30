@@ -782,6 +782,15 @@ class _Planner:
 
     def _make_cell(self, key):
         """(plans, keeps, covers, opens) of cell key, or None when its roads could not be fetched."""
+        widths = getattr(self, "widths", None)
+        if widths is not None and hasattr(widths, "prefetch"):
+            # the cell's buildings (its roads' widths) fetched while its roads are: one after the other before
+            def walls():
+                try:
+                    widths.prefetch([key])
+                except Exception as e:
+                    log.debug("grading: walls of %s: %s: %s", key, type(e).__name__, e)
+            threading.Thread(target=walls, daemon=True, name="walls-ahead").start()
         try:
             feats = self.md.cell(key, layers=("roads",), kind="demand").layers.get("roads")
         except Exception as e:      # no road data: ungraded (asked again after RETRY_S)
@@ -2276,6 +2285,18 @@ class Grader:
                     continue
                 got.setdefault((fid_part, float(p.xy[0, 0]), float(p.xy[0, 1])), p)
         return [got[k] for k in sorted(got)]
+
+    def prepare(self, lat, lon):
+        """Plan the cells the points' area needs now (several at once, _Planner._plan_missing), returning when they are:
+        a block's builder starts it beside its own work (its sea floor waited on the water cells, then its grading on
+        the road cells: 4 + 9 s of a fresh place's first block, one after the other, Lincoln 2026-10-30)."""
+        lat = np.asarray(lat, np.float64).ravel()
+        lon = np.asarray(lon, np.float64).ravel()
+        for pl, idx in self.store.planners_of(lat, lon):
+            keys = pl._keys(lat[idx], lon[idx])
+            pl._plan_missing(keys)      # (two or more at once; one is planned here)
+            for k in keys:
+                pl._cell_plans(k)
 
     def apply(self, lat, lon, base, lift=0.0, roads_only=False, planned_only=False):
         """_Planner.apply by the points' regions (the anchor plays no part). Same shape as base."""

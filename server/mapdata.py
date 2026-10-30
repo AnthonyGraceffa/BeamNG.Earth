@@ -74,7 +74,7 @@ import xproc
 
 log = logging.getLogger("earthd.mapdata")
 
-LAYER_THREADS = 4               # layers of a cell built at once (each fetches through the shared limits)
+LAYER_THREADS = 12              # layers built at once, every cell and caller of the process (mostly waiting on downloads: 4 were a fresh place's first graded block's ~25 s queue, Ipswich 2026-10-30)
 OSM_THREADS = 8                 # cells whose OpenStreetMap tags are read at once (alongside their Overture roads)
 # (cell, layer)s built ahead at once by warm() (a fresh place's first road tile asked for ~70 of them one after another:
 # 56 s in Marseille, GitHub #241): half the CPUs, at most 8, and none on 8 or fewer: each is a DuckDB query and a
