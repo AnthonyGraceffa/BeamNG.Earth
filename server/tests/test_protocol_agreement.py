@@ -195,7 +195,9 @@ SERVER_TO_MOD = {
     "areas": {"areas": F(list), "pinnedBytes": F(int, OPT), "result": F(dict, OPT)},
     "route_result": {"id": F(int), "points": F(list), "dist": F(NUM), "dur": F(NUM), "error": F(str, OPT),
                       "elev": F((list, dict), OPT)},  # OSRM; elev: the map's profile (routing.resample, dem.sample)
-    "route_download": {"total": F(int), "done": F(int), "active": F(bool)},  # routeahead.py: the route's corridor
+    "route_download": {"total": F(int), "done": F(int), "active": F(bool)},
+    # the blocks built already round the player (follow.preferReady takes one instead of its own target)
+    "terrain_ready_set": {"anchorId": F(int), "centres": F(list)},  # routeahead.py: the route's corridor
     "update": {"current": F(str), "latest": F(str), "url": F(str)},   # a newer version on GitHub (updates.py)
     "update_status": {"state": F(str), "text": F(str), "done": F(int, OPT), "total": F(int, OPT),
                       "version": F(str, OPT)},      # the "Update now" download (selfupdate.py)
@@ -531,15 +533,16 @@ class CacheAgreementTest(unittest.TestCase):
         self.assertIn("cacheInfo = nil", on_msg[on_msg.index("t == '_disconnected'"):on_msg.index("t == 'hello'")])
         self.assertIn("cacheInfo = { usedBytes = tonumber(msg.usedBytes)", on_msg[on_msg.index("t == 'cache'"):])
         settings = (LUA / "settings.lua").read_text(encoding="utf-8")
-        m = re.search(r"cacheCapGb = \{ kind = 'enum', default = '(\w+)', values = \{ ([^}]*) \}", settings)
-        values = re.findall(r"'(\w+)'", m.group(2))
-        self.assertEqual((m.group(1), values), ("20", ["5", "10", "20", "50", "unlimited"]))
+        # (a number of GB typed on the page since 2026-10-29, 0: no limit; the old choices still read: MIGRATE)
+        m = re.search(r"cacheCapGb = \{ kind = 'number', default = (\d+), min = 0,", settings)
+        self.assertIsNotNone(m, "cacheCapGb: a number setting")
         self.assertEqual(float(m.group(1)), cachemod.DEFAULT_CAP_GB, "the page's default is the server's")
+        self.assertIn("cacheCapGb = { unlimited = 0 }", settings)
         # (the settings pages' schema and state: earthSettingsStore.js, since the pause-menu tab, 2026-10-28)
         page = (LUA.parents[3] / "ui" / "ui-vue" / "mods" / "beamngEarth" / "earthSettingsStore.js").read_text(encoding="utf-8")
-        row = re.search(r'\{ id: "cacheCapGb", type: "select", default: "(\w+)".*?options: \[(.*?)\] \}', page, re.S)
+        row = re.search(r'\{ id: "cacheCapGb", type: "number", default: (\d+), min: 0,', page)
+        self.assertIsNotNone(row, "the page's cacheCapGb: a number box")
         self.assertEqual(row.group(1), m.group(1))
-        self.assertEqual(re.findall(r'value: "(\w+)"', row.group(2)), values)
         self.assertIn("beamngEarth_settings.uiCacheClear()", page)
 
 

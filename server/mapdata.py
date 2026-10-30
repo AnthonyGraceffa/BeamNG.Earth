@@ -564,7 +564,13 @@ class MapData:
     _mirror_lock = threading.Lock()
 
     def _mirror_note(self, nbytes):
-        """Count what this process wrote; every MIRROR_MB / 8 of it, the mirror cut back to MIRROR_MB."""
+        """Count what this process wrote; every MIRROR_MB / 8 of it, the mirror cut back to MIRROR_MB. Only in the
+        server's own process: every worker process walked the whole mirror (~100k files) at its first write, several
+        at once on a first visit, on the server's few CPUs while the world loaded (2026-10-30); earthd prunes it at
+        its start too (prune_own_caches)."""
+        import multiprocessing
+        if multiprocessing.current_process().name != "MainProcess":
+            return
         with MapData._mirror_lock:
             MapData._mirror_written += nbytes
             now = time.monotonic()

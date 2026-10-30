@@ -246,6 +246,9 @@ ROUTE_RETRY_S = 2.0               # a deferred tile/cell backs off this long bef
 FAST_BASE_V = 70.0              # m/s (157 mph): faster, a block waits at most BASE_FAST_WAIT_S for its photo after its
 BASE_FAST_WAIT_S = 0.15         # heights, then goes without it (block_base later): blocks took 0.6-3 s at 600 mph on a
                                 # Steam Deck, mostly the photo (heights 0.1-0.4 s), and the game paused 11 times a minute
+FAST_KEEP_S = 20.0              # ... and this long after it last was: a car the game holds for its ground (the drop
+                                # hold, the edge guard) reports no speed, and its next block waited for its photo
+                                # again (5-10 s at 500 mph on a first visit, Indianapolis 2026-10-30: held half the time)
 PROGRESS_S = 0.5            # load_progress at most this often (Connection.send_progress)
 GROUND_WAIT_S = 90.0        # a block's photo still to be drawn again counts as loading this long at most
 PERF_LOG_LINES, PERF_LOG_CHARS = 40, 2000   # a perf_log message's lines and characters a line, at most
@@ -289,7 +292,8 @@ SESSION_MARKER = ".earthd-session"
 CDAE_ROOT = ("temp", "temp", "beamngearth")
 PLACE_PREVIEWS_MAX = 100     # place pictures made per request (a long list: the rest next time)
 
-HM_CACHE = 6                # heightmaps kept beyond the protected ones
+HM_CACHE = 16               # heightmaps kept beyond the protected ones (6 before 2026-10-30: a fast player's prefetched
+                            # chain (PREFETCH_CHAIN) was evicted before the mod asked for it and built again)
 TERRAIN_STUCK_S = 90.0      # s: a terrain request still building this long is logged once (prepare_terrain)
 HM_KEEP_COMMITTED = 3       # the current terrain and the last two
 HM_KEEP_SENT = 2            # terrains handed to the mod but maybe not committed yet
@@ -314,6 +318,12 @@ HM_BUSY_TILE_WORKERS = 1    # far tiles built at once while a physics block is b
 WARM_STEPS_S = (0.0, 10.0, 20.0, 30.0)   # s ahead on the player's straight path whose road cells are planned early
 WARM_AROUND = 2000.0        # m: and every cell this close to the player (any heading)
 PREFETCH_START = 200.0      # m (Chebyshev) from the block centre before prefetching
+# A fast player (FAST_BASE_V) gets the chain of its next PREFETCH_CHAIN blocks prefetched, PREFETCH_PARALLEL at once: at
+# 500 mph the next block was asked for ~1.3 s before it was needed and took 0.5-3 s, so the game held its car for its
+# ground half the time (Indianapolis 2026-10-30); one predicted block was not enough
+PREFETCH_CHAIN = 4
+PREFETCH_PARALLEL = 2
+READY_SET_M = 3000.0        # m: the built blocks round the player the mod is told of (terrain_ready_set)
 # The mod's terrain-follow rule (mod follow.lua): it asks once the player is more than
 # FOLLOW_PREPARE (Chebyshev) from the block centre, for snap256(player + v * FOLLOW_LEAD),
 # clamped so the player stays within FOLLOW_REACH of the new centre on both axes
@@ -540,6 +550,23 @@ def predict_request(px, py, vx, vy, cx, cy, rule=FOLLOW_RULES[1024]):
                  for q, v, c in ((qx, vx, cx), (qy, vy, cy)) if abs(v) > 0.5]
         t = min(exits) + FRAME_S if exits else 0.0
     return predict_centre(px + vx * t, py + vy * t, vx, vy, lead, reach, rule.grid, rule.min_lead, rule.min_lead_v)
+
+
+def predict_chain(px, py, vx, vy, cx, cy, rule, n):
+    """The next n centres the mod will ask for (predict_request, chained): after each, the player where its path passes
+    nearest that centre, the next request from there. Fewer when the chain stops (no move, a repeat)."""
+    out = []
+    v2 = vx * vx + vy * vy
+    if v2 < 1.0:
+        return out
+    for _ in range(n):
+        c = predict_request(px, py, vx, vy, cx, cy, rule)
+        if c == (cx, cy) or c in out:
+            break
+        out.append(c)
+        t = max(0.0, ((c[0] - px) * vx + (c[1] - py) * vy) / v2)
+        px, py, (cx, cy) = px + vx * t, py + vy * t, c
+    return out
 
 
 def _num(msg, name, default=None):
@@ -3296,6 +3323,7 @@ class Connection:
         self.pending_block = None       # the last prepare_terrain of the active anchor
         self.terrain_wait = 0           # prepare_terrain requests being built (roads.Tracker: the ground first)
         self.predicted_block = None     # the terrain the prefetch expects next
+        self.predicted_chain = []       # ... and after it, a fast player's (PREFETCH_CHAIN; blocks)
         self.focus = (0.0, 0.0)         # player x, y in the active frame
         self.view_at = None             # the camera's x, y there when it is VIEW_AWAY_M or more from the car, else None
         self.foci = ()                  # other vehicles' collision foci there ((x, y, r, trees), parse_foci)
@@ -4530,7 +4558,10 @@ class Connection:
         else:
             return
         self.vel = (vx, vy)
-        self.s.fast = math.hypot(vx, vy) > FAST_BASE_V
+        now = time.monotonic()
+        if math.hypot(vx, vy) > FAST_BASE_V:
+            self.s.fast_at = now
+        self.s.fast = now - getattr(self.s, "fast_at", -1e9) < FAST_KEEP_S
         if self.s.boost_on:
             since = time.monotonic() - getattr(self, "boost_t0", 0.0)
             moving = math.hypot(vx, vy) > BOOST_MOVE_MS and since > BOOST_GRACE_S     # (the car settling: not moving)
@@ -4569,6 +4600,10 @@ class Connection:
                 c = predict_request(px, py, *self.vel, base.cx, base.cy, rule)
                 if c != (base.cx, base.cy) and self.s.layout.block_at(*c) != self.block:
                     self.predicted_block = self.s.layout.block_at(*c)
+            self.predicted_chain = []
+            if math.hypot(*self.vel) > FAST_BASE_V:
+                self.predicted_chain = [self.s.layout.block_at(*c) for c in
+                                        predict_chain(px, py, *self.vel, base.cx, base.cy, rule, PREFETCH_CHAIN)]
         self.update_far()
         if self.teleport_pending and time.monotonic() - self.teleport_t0 > TELEPORT_PAUSE_MAX_S:
             self.teleport_pending = False   # the mod never committed it (it stayed): the old place's work goes on
@@ -4577,6 +4612,7 @@ class Connection:
             self.refresh_status()
             return
         self.maybe_prefetch()
+        self.send_ready_set()
         if aid == self.active and self.following:
             self.s.warm_roads(self.s.anchors[aid], *self.focus, *self.vel)
             self.s.warm_imagery(self.s.anchors[aid], *self.focus, *self.vel)
@@ -4949,25 +4985,49 @@ class Connection:
             self.status(self.last_status or f"Horizon {radius / 1000:.0f} km")
         return radius, {"max_level": self.s.max_level, "disc": True, "horizon": cull}
 
-    def maybe_prefetch(self):
-        """Speculatively build the terrain the mod is about to ask for."""
-        anchor = self.s.anchors.get(self.active)
-        if anchor is None or self.predicted_block is None or self.prefetching:
+    def send_ready_set(self):
+        """'terrain_ready_set' {anchorId, centres}: the blocks of the active anchor built already, within READY_SET_M of
+        the player (the mod asks for one of them instead of its own target when it is close: follow.preferReady), when
+        that set changed."""
+        aid = self.active
+        if aid is None:
             return
-        cx, cy = self.predicted_block.cx, self.predicted_block.cy
-        if self.s.terrain_cached((anchor.id, cx, cy)):
-            return
-        self.prefetching = True
+        px, py = self.focus
+        cs = sorted((cx, cy) for (a, cx, cy) in list(self.s.hm) if a == aid
+                    and max(abs(cx - px), abs(cy - py)) <= READY_SET_M)
+        if cs != getattr(self, "ready_sent", None):
+            self.ready_sent = cs
+            self.send({"type": "terrain_ready_set", "anchorId": aid, "centres": [[float(cx), float(cy)] for cx, cy in cs]})
 
-        async def run():
-            try:
-                await self.s.terrain(anchor, cx, cy, lane=LANE_PREFETCH)
-                log.debug("prefetched terrain (%d, %.0f, %.0f)", anchor.id, cx, cy)
-            except Exception:
-                log.exception("terrain prefetch failed")
-            finally:
-                self.prefetching = False
-        self.spawn(run())
+    def maybe_prefetch(self):
+        """Speculatively build the terrain the mod is about to ask for: the predicted block, and a fast player's chain
+        after it (PREFETCH_CHAIN), in order, PREFETCH_PARALLEL at once."""
+        anchor = self.s.anchors.get(self.active)
+        if anchor is None:
+            return
+        want = [b for b in [self.predicted_block] + list(getattr(self, "predicted_chain", ())) if b is not None]
+        busy = getattr(self, "prefetch_busy", None)
+        if busy is None:
+            busy = self.prefetch_busy = set()
+        for b in want:
+            if len(busy) >= PREFETCH_PARALLEL:
+                return
+            key = (anchor.id, b.cx, b.cy)
+            if key in busy or self.s.terrain_cached(key):
+                continue
+            busy.add(key)
+            self.prefetching = True
+
+            async def run(cx=b.cx, cy=b.cy, key=key):
+                try:
+                    await self.s.terrain(anchor, cx, cy, lane=LANE_PREFETCH)
+                    log.debug("prefetched terrain (%d, %.0f, %.0f)", anchor.id, cx, cy)
+                except Exception:
+                    log.exception("terrain prefetch failed")
+                finally:
+                    busy.discard(key)
+                    self.prefetching = bool(busy)
+            self.spawn(run())
 
     # --- far field ----------------------------------------------------------
     def forced(self):

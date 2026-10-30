@@ -7502,6 +7502,12 @@ class GeoTracker:
                     along = ((cx - x) * vx + (cy - y) * vy) / s
                     if along < -TILE / 2:
                         d = d * SIDE_PENALTY + LEAD_MAX_M
+                    else:
+                        # (by the distance along the path, a tile off the corridor later by how far off it is: by
+                        # their plain distance the sides within SEND_M all came before the corridor beyond it, and
+                        # at 500 mph the car outran its road tiles, 0 m of them ahead, Indianapolis 2026-10-30)
+                        side = abs(((cx - x) * vy - (cy - y) * vx) / s)
+                        d = max(0.0, along) + max(0.0, side - CORRIDOR_M) * SIDE_PENALTY
                 return (0, d)
             if k in seen:
                 return (1, seen[k])

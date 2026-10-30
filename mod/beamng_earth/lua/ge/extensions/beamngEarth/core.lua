@@ -1029,6 +1029,8 @@ local function onMessage(msg)
     else
       setStatus('Anchor request failed: ' .. tostring(msg.error))
     end
+  elseif t == 'terrain_ready_set' then   -- blocks built already (follow.preferReady): this anchor's only
+    follow.setReady(msg.anchorId == st.anchorId and msg.centres or {})
   elseif t == 'terrain_ready' then
     local p = st.terrainPending
     if not p or msg.requestId ~= p.requestId or msg.anchorId ~= st.anchorId then return end -- stale
