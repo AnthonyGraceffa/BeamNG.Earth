@@ -745,7 +745,9 @@ class MeshServerTest(ServerHarness):
         cone = ff.view_cone({"x": 0, "y": -8, "fx": 0, "fy": 1, "fovDeg": 60})
         vd = sorted(ff.view_distance(ff.tile_of(k), cone, 0, 0) for k in want)
         slack = self.server.tile_workers
-        self.assertTrue(all(ff.view_distance(ff.tile_of(m["key"]), cone, 0, 0) <= vd[8 + slack] for m in tiles[:8]))
+        ranks = [sum(1 for v in vd if v < ff.view_distance(ff.tile_of(m["key"]), cone, 0, 0)) for m in tiles[:8]]
+        self.assertTrue(all(ff.view_distance(ff.tile_of(m["key"]), cone, 0, 0) <= vd[8 + slack] for m in tiles[:8]),
+                        f"the first 8 sent ranked {ranks} by view distance (slack {slack})")
         self.assertEqual(tiles[0]["level"], ex)
         # textures: DXT1 with mips, the layout's size per level (32 cells: TEX_NEAR for the two
         # finest levels, TEX_FAR beyond; 64: 256 px to L1, 512 from L2); shapes name the material
