@@ -745,7 +745,9 @@ class MeshServerTest(ServerHarness):
         cone = ff.view_cone({"x": 0, "y": -8, "fx": 0, "fy": 1, "fovDeg": 60})
         vd = sorted(ff.view_distance(ff.tile_of(k), cone, 0, 0) for k in want)
         slack = self.server.tile_workers
-        self.assertTrue(all(ff.view_distance(ff.tile_of(m["key"]), cone, 0, 0) <= vd[8 + slack] for m in tiles[:8]))
+        ranks = [sum(1 for v in vd if v < ff.view_distance(ff.tile_of(m["key"]), cone, 0, 0)) for m in tiles[:8]]
+        self.assertTrue(all(ff.view_distance(ff.tile_of(m["key"]), cone, 0, 0) <= vd[8 + slack] for m in tiles[:8]),
+                        f"the first 8 sent ranked {ranks} by view distance (slack {slack})")
         self.assertEqual(tiles[0]["level"], ex)
         # textures: DXT1 with mips, the layout's size per level (32 cells: TEX_NEAR for the two
         # finest levels, TEX_FAR beyond; 64: 256 px to L1, 512 from L2); shapes name the material
@@ -1075,6 +1077,11 @@ class SessionCleanupTest(unittest.TestCase):
                 self.assertFalse(os.path.exists(old))
                 self.assertFalse(os.path.exists(cache))
                 self.assertTrue(os.path.exists(foreign))
+                # moved out of the game's folder before the delete (one notification for its file watcher, not one a
+                # file), and gone from the trash too
+                trash = os.path.join(tmp, "cache", earthd.TRASH_DIR)
+                self.assertTrue(os.path.isdir(trash))
+                self.assertEqual(os.listdir(trash), [])
                 self.assertEqual(server.cdae_dir, os.path.join(tmp, "temp", "temp", "beamngearth", server.sid.lower()))
             finally:
                 server.tile_pool.shutdown()

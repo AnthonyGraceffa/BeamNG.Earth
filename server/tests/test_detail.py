@@ -218,10 +218,16 @@ class DetailFastPhotoLaterTest(ServerHarness):
         tr, _ = self.c.until(lambda m: m["type"] == "terrain_ready", timeout=60)
         self.assertNotIn("base", tr, "sent without its photo")
         self.assertLess(time.monotonic() - t0, 0.95, "not held for the photo")
-        m, _ = self.c.until(lambda m: m["type"] == "block_base", timeout=30)
+        # a stand-in right after it (the imagery alone, write_quick_base; the level's green base was GitHub #548), then
+        # its own photo
+        q, _ = self.c.until(lambda m: m["type"] == "block_base", timeout=30)
+        self.assertTrue(q["base"].endswith("_base_q.png"), "a stand-in first")
+        self.assertTrue(os.path.exists(self.fs(q["base"])))
+        m, _ = self.c.until(lambda m: m["type"] == "block_base" and not m["base"].endswith("_base_q.png"), timeout=30)
         self.assertEqual((m["anchorId"], m["cx"], m["cy"]), (aid, 512.0, 0.0))
         self.assertTrue(os.path.exists(self.fs(m["base"])))
         self.assertEqual(s.hm[(aid, 512.0, 0.0)]["base"], os.path.basename(m["base"]))
+        self.assertFalse(m["base"].endswith("_base_q.png"), "its own photo replaced the stand-in")
 
 
 class DetailNoImageryTest(ServerHarness):
