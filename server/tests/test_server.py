@@ -1075,6 +1075,11 @@ class SessionCleanupTest(unittest.TestCase):
                 self.assertFalse(os.path.exists(old))
                 self.assertFalse(os.path.exists(cache))
                 self.assertTrue(os.path.exists(foreign))
+                # moved out of the game's folder before the delete (one notification for its file watcher, not one a
+                # file), and gone from the trash too
+                trash = os.path.join(tmp, "cache", earthd.TRASH_DIR)
+                self.assertTrue(os.path.isdir(trash))
+                self.assertEqual(os.listdir(trash), [])
                 self.assertEqual(server.cdae_dir, os.path.join(tmp, "temp", "temp", "beamngearth", server.sid.lower()))
             finally:
                 server.tile_pool.shutdown()

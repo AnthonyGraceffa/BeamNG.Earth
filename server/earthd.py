@@ -254,6 +254,7 @@ BASE_WAIT_S = 0.5               # ... and at any speed this long: a 4-core PC's 
 FAST_KEEP_S = 20.0              # ... and this long after it last was: a car the game holds for its ground (the drop
                                 # hold, the edge guard) reports no speed, and its next block waited for its photo
                                 # again (5-10 s at 500 mph on a first visit, Indianapolis 2026-10-30: held half the time)
+TRASH_DIR = "trash"         # in the cache: folders of the game's user folder moved out to be deleted (_rmtree_outside)
 PROGRESS_S = 0.5            # load_progress at most this often (Connection.send_progress)
 GROUND_WAIT_S = 90.0        # a block's photo still to be drawn again counts as loading this long at most
 PERF_LOG_LINES, PERF_LOG_CHARS = 40, 2000   # a perf_log message's lines and characters a line, at most
@@ -626,6 +627,7 @@ class Server:
         default); retex_rate: --retex-rate (live retextures per second, 0 = none)."""
         self.sid = time.strftime("%Y%m%d-%H%M%S-") + secrets.token_hex(2)
         self.user_dir = user_dir           # the game's user folder (detail mode fills its terrain texture cache)
+        self.cache_dir = cache_dir         # (here already: _scan_sessions moves old sessions into its trash)
         root = self.root = os.path.join(user_dir, "temp", "beamngEarth")
         self.cdae_root = os.path.join(user_dir, *CDAE_ROOT)
         # earlier runs' session folders a game may still show: sid -> monotonic time found / released
@@ -889,8 +891,26 @@ class Server:
                     os.remove(os.path.join(terraincache.cache_dir(self.user_dir), key + ".dds"))
                 except OSError:
                     pass
-        shutil.rmtree(os.path.join(self.root, sid), ignore_errors=True)
-        shutil.rmtree(os.path.join(self.cdae_root, sid.lower()), ignore_errors=True)
+        for d in (os.path.join(self.root, sid), os.path.join(self.cdae_root, sid.lower())):
+            self._rmtree_outside(d)
+
+    def _rmtree_outside(self, d):
+        """Remove folder d of the game's user folder: moved out of it first (into the cache's trash, one rename) and
+        deleted there. Deleted in place, a whole session's thousands of files were as many notifications for the game's
+        file watcher, on its main thread: a 4 s frame at Utrecht 2026-10-30 ("FileWatchers 1501.7"). In place when the
+        move cannot be made (the cache on another drive)."""
+        if not os.path.isdir(d):
+            return
+        cache = getattr(self, "cache_dir", None)
+        if cache:
+            trash = os.path.join(cache, TRASH_DIR, f"{os.path.basename(d)}_{os.getpid()}_{time.monotonic_ns()}")
+            try:
+                os.makedirs(os.path.dirname(trash), exist_ok=True)
+                os.replace(d, trash)
+                d = trash
+            except OSError:
+                pass
+        shutil.rmtree(d, ignore_errors=True)
 
     def _touch(self, sid):
         try:

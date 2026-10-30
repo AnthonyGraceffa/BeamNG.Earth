@@ -937,7 +937,11 @@ def _write_geo_content(out_dir, vfs_dir, tile, P):
     import pickle
     import roads as roadsmod
     names = geo_names(tile.key)
-    tmpdir = os.path.join(out_dir, f".rg_{tile.key}_{os.getpid()}_{threading.get_ident()}")
+    # (written aside in the staging folder, outside the game's user folder: in the session folder each of its files was
+    # created, written and deleted under the game's file watcher, "Handle error ... .rg_g17_..." in its log)
+    import staging
+    aside = staging.staging_dir(os.path.join(out_dir, "x")) or out_dir
+    tmpdir = os.path.join(aside, f".rg_{tile.key}_{os.getpid()}_{threading.get_ident()}")
     os.makedirs(tmpdir, exist_ok=True)
     try:
         # (roads.write_tile writes the shapes and the rows; its names are the anchor tile's: written aside, renamed)
