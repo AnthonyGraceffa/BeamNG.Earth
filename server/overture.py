@@ -23,6 +23,7 @@ polygons are clipped to the cell (an ocean or a national park would otherwise re
 outline in every cell); everything else is whole (a building or road segment that crosses the
 cell edge is listed in every cell it touches, `own` marks the one cell that owns it).
 """
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,7 @@ import numpy as np
 import mapgeom as mg
 import netfetch
 import rangeread
+import xproc
 import staging
 
 log = logging.getLogger("earthd.mapdata")
@@ -51,6 +53,8 @@ REMOTE_FILES = 32               # open RemoteFiles kept (their blocks share rang
 # DuckDB's own prefetching reads whole row groups one after the other; Reader._plan fetches what the
 # query needs in parallel first, so DuckDB reads lazily from the block cache
 PARQUET_CONFIG = {"disable_parquet_prefetching": True}
+RG_DIR = "rows"                 # the row groups' local copies (Reader._local_rows), beside a file's blocks
+RG_WAIT_S = 60.0                # a copy another process makes is waited for this long
 META_FILE = "rowgroups.json"     # a file's parsed row groups, beside its cached blocks (_meta_load)
 BOX_ROWS = 2_000_000           # row groups' bbox rows kept per Reader (_plan: ~16 B a row as float32)
 FETCH_THREADS = 8               # parallel range requests per Reader (Overture's hosts allow 8 at once each)
@@ -271,6 +275,11 @@ class StacIndex:
 META_FILES = 2048        # files whose parsed Parquet metadata Reader keeps (a few hundred row groups each)
 
 
+def _q(path):
+    """A path in a DuckDB string literal."""
+    return str(path).replace("'", "''")
+
+
 class Reader:
     """Overture layers per cell (see the module docstring). threads: DuckDB threads per query."""
 
@@ -395,7 +404,7 @@ class Reader:
             if not rows:
                 return empty(layer), {}         # no row of these files lies in the cell
             t2 = time.perf_counter()
-            out = self._run(con, proto, paths, layer, spec, bounds, rows)
+            out = self._run(con, proto, paths, layer, spec, bounds, rows, files, kind)
             log.debug("mapdata %s %s: index %.2f s, plan %.2f s, query %.2f s", layer, cell, t1 - t0, t2 - t1,
                       time.perf_counter() - t2)
             return out
@@ -573,7 +582,36 @@ class Reader:
             rows.append((f"{proto}://{path}", g["first"], g["first"] + g["n"] - 1))
         return rows
 
-    def _run(self, con, proto, paths, layer, spec, bounds, rows):
+    def _local_rows(self, con, layer, spec, rows, files, kind):
+        """Local copies of the row groups rows ([(uri, first row, last row)]): each one's columns the layer's query
+        reads, as one Parquet file beside the file's blocks (RG_DIR), made once (xproc: one process) and read by DuckDB
+        itself. A place's cells share their row groups (a fresh place's first block: 55 queries decoded 117 row groups
+        of 9 through the Python filesystem, 2026-10-30). Returns the files."""
+        extra = f", {spec['extra']}" if spec.get("extra") else ""
+        proj = (f"id, version, {spec['cols']}, ST_AsWKB(geometry) AS wkb, (bbox.xmin + bbox.xmax) / 2 AS cx, "
+                f"(bbox.ymin + bbox.ymax) / 2 AS cy, sources{extra}, bbox")
+        tag = hashlib.sha1(proj.encode()).hexdigest()[:12]
+        out = []
+        for u, a, b in rows:
+            path = u.split("://", 1)[-1]
+            d = os.path.join(files[path].cache_dir, RG_DIR)
+            f = os.path.join(d, f"{layer}_{tag}_{int(a)}_{int(b)}.parquet")
+            if not os.path.exists(f):
+                got, mine = xproc.once(f + ".lock", lambda f=f: f if os.path.exists(f) else None, RG_WAIT_S, kind)
+                if got is None:
+                    try:
+                        os.makedirs(d, exist_ok=True)
+                        tmp = f"{f}.{os.getpid()}.{threading.get_ident()}.tmp"
+                        con.execute(f"""COPY (SELECT {proj} FROM read_parquet('{_q(u)}', file_row_number = true)
+                            WHERE file_row_number BETWEEN {int(a)} AND {int(b)}) TO '{_q(tmp)}' (FORMAT parquet)""")
+                        os.replace(tmp, f)
+                    finally:
+                        if mine:
+                            xproc.release(f + ".lock")
+            out.append(f)
+        return out
+
+    def _run(self, con, proto, paths, layer, spec, bounds, rows, files=None, kind="demand"):
         lon0, lat0, lon1, lat1 = bounds
         src = ("read_parquet([" + ", ".join(f"'{proto}://{p}'" for p in paths) + "], filename = true, "
                "file_row_number = true)")
@@ -586,11 +624,22 @@ class Reader:
         # The scan first, the dedup (by id, highest version) and numbering from the copy: with the
         # window in the same statement DuckDB 1.5 stopped skipping row groups by their statistics and
         # read every row group of the file between the matches (12 MB more, 9 s, for a city cell).
-        con.execute(f"""CREATE TEMP TABLE s AS
-              SELECT id, version, {spec['cols']}, ST_AsWKB(geometry) AS wkb,
-                     (bbox.xmin + bbox.xmax) / 2 AS cx, (bbox.ymin + bbox.ymax) / 2 AS cy,
-                     sources{extra}
-              FROM {src} WHERE ({only}) AND {bbox}""")
+        local = None
+        if files is not None:
+            try:
+                local = self._local_rows(con, layer, spec, rows, files, kind)
+            except Exception as e:      # (a full disk, DuckDB's own errors: read from the files as before)
+                log.debug("mapdata %s: local row groups: %s: %s", layer, type(e).__name__, e)
+                local = None
+        if local:
+            con.execute(f"""CREATE TEMP TABLE s AS SELECT * EXCLUDE (bbox)
+                  FROM read_parquet([{", ".join(f"'{_q(f)}'" for f in local)}]) WHERE {bbox}""")
+        else:
+            con.execute(f"""CREATE TEMP TABLE s AS
+                  SELECT id, version, {spec['cols']}, ST_AsWKB(geometry) AS wkb,
+                         (bbox.xmin + bbox.xmax) / 2 AS cx, (bbox.ymin + bbox.ymax) / 2 AS cy,
+                         sources{extra}
+                  FROM {src} WHERE ({only}) AND {bbox}""")
         con.execute("""CREATE TEMP TABLE t AS
             SELECT row_number() OVER (ORDER BY id) - 1 AS fi, * FROM (
               SELECT * EXCLUDE (version) FROM s
