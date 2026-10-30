@@ -238,6 +238,10 @@ AHEAD_LAYERS = ("roads", "buildings", "building_parts", "infrastructure", "water
 # instead of the player's current heading, since a road route can wander off that heading entirely.
 ROUTE_AHEAD_ON = True            # --route-prefetch
 ROUTE_AHEAD_MAX_M = 20000.0      # --route-prefetch-km * 1000 (15-25 km is sane; the user, 2026-10-22)
+# the GPS's "Download along route" setting (the user, 2026-10-29: "options on pre downloading/generating along a gps
+# route"): the route message's "download": off, ahead (ROUTE_AHEAD_MAX_M) or the whole route (at most this far)
+ROUTE_DOWNLOAD_MODES = ("off", "ahead", "route")
+ROUTE_WHOLE_MAX_M = 500000.0
 ROUTE_RETRY_S = 2.0               # a deferred tile/cell backs off this long before the next one in the corridor
 FAST_BASE_V = 70.0              # m/s (157 mph): faster, a block waits at most BASE_FAST_WAIT_S for its photo after its
 BASE_FAST_WAIT_S = 0.15         # heights, then goes without it (block_base later): blocks took 0.6-3 s at 600 mph on a
@@ -1412,6 +1416,31 @@ class Server:
             self.keep_fuel_pads(res["content"][3])
         return res
 
+    def geo_content_key(self, gx, gy):
+        """The revisit key geotile (gx, gy)'s road content has with this server's settings (blockworker._geo_content_key,
+        its own place's rules), or None (no map data)."""
+        if self.mapdata is None:
+            return None
+        import geotiles
+        lh, mph, buried, lamps, country, gzoom = self.geo_rules(gx, gy)
+        return blockworker._geo_content_key(geotiles.geobox(gx, gy).key, gzoom, self.buildings, lh, mph,
+                                            self.gas_stations, buried, lamps, country, md=self.mapdata.versions())
+
+    def geo_prebuilt(self, gx, gy):
+        """Is geotile (gx, gy)'s road content in the revisit cache (no worker, no network)? -> its key or None."""
+        k = self.geo_content_key(gx, gy)
+        return k if k is not None and os.path.exists(revisitmod._path(self.cache_dir, "roadsg", k)) else None
+
+    def prebuild_geo(self, gx, gy):
+        """Saved areas' world phase: geotile (gx, gy)'s road content built into the revisit cache in a road process
+        (blockworker.prebuild_geo), the game sent nothing. -> its revisit key, or None (not complete: tried later)."""
+        if self.mapdata is None or self.road_pool is None or not revisitmod.ON:
+            return None
+        lh, mph, buried, lamps, country, gzoom = self.geo_rules(gx, gy)
+        scratch = os.path.join(self.cache_dir, "areas", "scratch")
+        return self.road_pool.submit(blockworker.prebuild_geo, gx, gy, gzoom, scratch, self.buildings, lh, mph,
+                                     self.gas_stations, buried, lamps, country).result(timeout=ROAD_TILE_TIMEOUT_S)
+
     def build_roads_tile(self, aid, tx, ty):
         """roads.py: one road tile of anchor aid, written to the session folder. Returns (vfs path,
         chunks) or None if the anchor is gone. Worker threads (fetches the map cells it lacks)."""
@@ -1525,7 +1554,16 @@ class Server:
 
         # Share the bridge mesh's exact parapet geometry with the tile builder.
         # Mapped rails on a deck are replaced by guardrails.bridge_rows(); the parapet runs also feed the fallback matching.
-        parapets = roadmeshmod.parapet_runs(chunks, ctx, ground=cover)
+        pads_near = []
+        if anchor.bridges is not None:  # (the junction pads round the tile: roads.deck_pads)
+            try:
+                pad_parts = list(anchor.bridges.parts(cells, (box[0] - 40, box[1] - 40, box[2] + 40, box[3] + 40)))
+                pads_near = roadsmod.deck_pads([(f, sp, xy, z) for f, sp, xy, z, _lon in pad_parts], near_roads, box,
+                                               anchor.bridges._ground, own=False)
+            except Exception as ex:
+                log.warning("deck pads: tile %s_%s: %s: %s", tx, ty, type(ex).__name__, ex)
+        pads = [p for p in pads_near if roadsmod.box_owns(box, float(p[1][0]), float(p[1][1]))]
+        parapets = roadmeshmod.parapet_runs(chunks, ctx, ground=cover, pads=pads_near)
         import guardrails as guardrailsmod
         infra_fn = lambda key: self.mapdata.cell(key, layers=("infrastructure",), kind="demand").layers.get("infrastructure")
         low_parapet_decks = set()
@@ -1556,7 +1594,7 @@ class Server:
                                  ctx,
                                  anchor.bridges.beams_in(roadsmod.tile_bbox(tx, ty)) if anchor.bridges is not None else (),
                                  ground=cover, parapets=parapets,
-                                 low_parapet_decks=low_parapet_decks)
+                                 low_parapet_decks=low_parapet_decks, pads=pads)
         tmesh = roadmeshmod.tunnel(chunks, (x0, y0, 0.0), rwalls)
         import railways
         rmesh = railways.tile_mesh(anchor.frame, tx, ty,
@@ -3363,6 +3401,7 @@ class Connection:
         self.credits = creditsmod.Tracker()     # data credits: throttle, last message sent (--credits on)
         self.ground_busy = False                # a groundahead job is running (one at a time)
         self.route_dl_version = 0               # bumped by every route(): supersedes a running route_download job
+        self.route_points = []                  # the last planned route's points ([lat, lon]: a saved route's)
         self.sea_busy = False                   # a water-tile plan is running (sea_tiles)
         self.sea_checked = None                 # (anchor id, 512 m square, monotonic, complete) of the last plan
         self.sea_sent = None                    # (anchor id, tiles) of the last "sea" message
@@ -3411,9 +3450,10 @@ class Connection:
         files.request(want)
 
     async def route(self, msg):
-        """{"id", "lat0", "lon0", "lat1", "lon1"} -> route_result {"id", "points": [[lat, lon]...], "dist", "dur",
-        "elev": [[dist_m, elev_m], ...]?, "error"?}. Also (re)starts this route's corridor prefetch (route_download,
-        routeahead.py)."""
+        """{"id", "lat0", "lon0", "lat1", "lon1", "download"?} -> route_result {"id", "points": [[lat, lon]...], "dist",
+        "dur", "elev": [[dist_m, elev_m], ...]?, "error"?}. Also (re)starts this route's corridor prefetch
+        (route_download, routeahead.py; download: "off", "ahead" (ROUTE_AHEAD_MAX_M, the default) or "route" (the
+        whole route, up to ROUTE_WHOLE_MAX_M))."""
         self.route_dl_version += 1
         version = self.route_dl_version
         out = {"type": "route_result", "id": msg.get("id"), "points": [], "dist": 0.0, "dur": 0.0}
@@ -3434,7 +3474,9 @@ class Connection:
                  msg.get("lon0"), msg.get("lat1"), msg.get("lon1"), len(out["points"]), out["dist"] / 1000,
                  (" (" + out["error"] + ")") if "error" in out else "")
         self.send(out)
-        self.route_download(version, out["points"])
+        self.route_points = out["points"] if "error" not in out else []
+        mode = msg.get("download")
+        self.route_download(version, out["points"], mode if mode in ROUTE_DOWNLOAD_MODES else "ahead")
 
     def _route_elevation(self, points):
         """The route's elevation profile for the map (routing.resample onto even steps, dem.sample): [[dist_m,
@@ -3453,20 +3495,21 @@ class Connection:
         elev = route_profile_smooth(self.s.dem.sample(lats, lons, zoom))
         return [[round(p[2], 1), round(float(e), 1)] for p, e in zip(pts, elev)]
 
-    def route_download(self, version, points):
+    def route_download(self, version, points, mode="ahead"):
         """Prefetch the route's corridor (elevation tiles and road/building map cells) up to
-        ROUTE_AHEAD_MAX_M ahead, at "prefetch" priority, pushing route_download {total, done, active}
-        (throttled like Server._progress) until it finishes or a newer route() supersedes it (checked by
-        version, since self.route_pool's single worker already serializes a newer job behind this one)."""
+        ROUTE_AHEAD_MAX_M ahead (mode "ahead"; "route": ROUTE_WHOLE_MAX_M, "off": none), at "prefetch" priority,
+        pushing route_download {total, done, active} (throttled like Server._progress) until it finishes or a newer
+        route() supersedes it (checked by version, since self.route_pool's single worker already serializes a newer
+        job behind this one)."""
         empty = {"type": "route_download", "total": 0, "done": 0, "active": False}
-        if not ROUTE_AHEAD_ON or self.s.dem is None or len(points) < 2:
+        if not ROUTE_AHEAD_ON or mode == "off" or self.s.dem is None or len(points) < 2:
             self.send(empty)
             return
         aid = self.active
         zoom = self.s.anchors[aid].hm_zoom if aid in self.s.anchors else demmod.FINE_ZOOM
         reach = self.s.layout.block * heightmap.SQUARE / 2 + AHEAD_MARGIN_M
         layers = (AHEAD_LAYERS if self.s.buildings else ("roads",)) if self.s.mapdata is not None else ()
-        pts = routeaheadmod.arc_length_points(points, ROUTE_AHEAD_MAX_M)
+        pts = routeaheadmod.arc_length_points(points, ROUTE_WHOLE_MAX_M if mode == "route" else ROUTE_AHEAD_MAX_M)
         dem_keys, cell_layer_pairs = routeaheadmod.need(self.s.dem, self.s.mapdata, pts, reach, zoom, layers)
         total = len(dem_keys) + len(cell_layer_pairs)
         if total == 0:
@@ -3675,30 +3718,52 @@ class Connection:
                 out["error"] = str(e)[:200]
         self.send(out)
 
+    def _area_route(self, msg):
+        """A saved route's points (area_plan / area_add with "route": "current": the last planned GPS route) as
+        (lats, lons), or None (a box)."""
+        if msg.get("route") != "current":
+            return None
+        pts = self.route_points or []
+        return [p[0] for p in pts], [p[1] for p in pts]
+
     async def area_plan(self, msg):
-        """{"id", "s", "w", "n", "e"} -> area_plan_result {"id", "ok", km2, items, missing, downloadBytes, diskBytes,
-        seconds, days, hosts, excluded, "error"?} (areas.Areas.plan: no network)."""
+        """{"id", "s", "w", "n", "e"} or {"id", "route": "current", "half"} -> area_plan_result {"id", "ok", km2, items,
+        missing, downloadBytes, diskBytes, seconds, days, hosts, excluded, km? (a route's length), "error"?}
+        (areas.Areas.plan / plan_route: no network)."""
         out = {"type": "area_plan_result", "id": msg.get("id"), "ok": False}
         if self.s.areas is None:
             out["error"] = "saved areas need the download cache"
         else:
             try:
-                out.update(await asyncio.get_running_loop().run_in_executor(
-                    None, self.s.areas.plan, msg.get("s"), msg.get("w"), msg.get("n"), msg.get("e")))
+                route = self._area_route(msg)
+                mode = msg.get("mode") if isinstance(msg.get("mode"), str) else areasmod.DEFAULT_MODE
+                if route is not None:
+                    out.update(await asyncio.get_running_loop().run_in_executor(
+                        None, self.s.areas.plan_route, route[0], route[1], msg.get("half"), mode))
+                else:
+                    out.update(await asyncio.get_running_loop().run_in_executor(
+                        None, self.s.areas.plan, msg.get("s"), msg.get("w"), msg.get("n"), msg.get("e"), mode))
             except Exception as e:      # (the box stays without an estimate)
                 out.update(ok=False, error=f"{type(e).__name__}: {e}"[:200])
         self.send(out)
 
     async def area_add(self, msg):
-        """{"id", "s", "w", "n", "e", "name"?} -> areas {..., "result": {"id", "ok", "area" or "error"}}."""
+        """{"id", "s", "w", "n", "e", "name"?} or {"id", "route": "current", "half", "name"?} -> areas {..., "result":
+        {"id", "ok", "area" or "error"}}."""
         if self.s.areas is None:
             self.send({"type": "areas", "areas": [], "result": {"id": msg.get("id"), "ok": False,
                                                                 "error": "saved areas need the download cache"}})
             return
         name = msg.get("name")
-        ok, info = await asyncio.get_running_loop().run_in_executor(
-            None, self.s.areas.add, msg.get("s"), msg.get("w"), msg.get("n"), msg.get("e"),
-            name if isinstance(name, str) else "")
+        name = name if isinstance(name, str) else ""
+        mode = msg.get("mode") if isinstance(msg.get("mode"), str) else areasmod.DEFAULT_MODE
+        route = self._area_route(msg)
+        if route is not None:
+            ok, info = await asyncio.get_running_loop().run_in_executor(
+                None, self.s.areas.add_route, route[0], route[1], msg.get("half"), name, mode)
+        else:
+            ok, info = await asyncio.get_running_loop().run_in_executor(
+                None, self.s.areas.add, msg.get("s"), msg.get("w"), msg.get("n"), msg.get("e"), name, mode)
         res = {"id": msg.get("id"), "ok": ok, ("area" if ok else "error"): info}
         self.send(self.s.areas_message(res))
 
@@ -4557,9 +4622,9 @@ class Connection:
                 self.roads.on_pose(self, aid, *self.focus, asyncio.get_running_loop(), self.s.build_roads_geo,
                                    vel=self.vel, ground_busy=self.terrain_wait > 0, view=self.view_at,
                                    foci=self.foci, frame=anchor.frame if anchor is not None else None)
-                # (the sign tiles stay the anchor's: those round the car once its road geotiles are in)
-                ready = (set(roadsmod.tiles_near(*self.focus, roadsmod.SEND_M))
-                         if self.roads.progress()[0] >= self.roads.progress()[1] else set())
+                # (the sign tiles stay the anchor's: each once the road geotiles under it are in)
+                ready = self.roads.ready_tiles(anchor.frame, *self.focus, roadsmod.SEND_M) if anchor is not None \
+                    else set()
             else:
                 self.roads.on_pose(self, aid, *self.focus, asyncio.get_running_loop(), self.s.build_roads_tile,
                                    vel=self.vel, ground_busy=self.terrain_wait > 0, view=self.view_at,
@@ -5636,7 +5701,8 @@ def prune_own_caches(cache_dir, started=None):
                            (os.path.join("dem", "decoded"), demmod.MIRROR_MB, lambda n: n.endswith(".npy")),
                            ("peercache", peerworkmod.CACHE_BYTES / 1e6, None),
                            ("roadwidth", roadwidthmod.STORE_MB, lambda n: n.endswith(".npy")),
-                           (revisitmod.SUBDIR, revisitmod.MAX_MB, lambda n: n.endswith(".zip"))):
+                           (revisitmod.SUBDIR, revisitmod.MAX_MB,
+                            lambda n, kept=areasmod.pinned_world(cache_dir): n.endswith(".zip") and n[:-4] not in kept)):
         try:
             n, left = cachemod.prune_dir(os.path.join(cache_dir, sub), mb * 1e6, match=match)
             if n:
