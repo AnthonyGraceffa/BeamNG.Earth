@@ -200,7 +200,8 @@ SERVER_TO_MOD = {
     "route_download": {"total": F(int), "done": F(int), "active": F(bool)},
     # the blocks built already round the player (follow.preferReady takes one instead of its own target)
     "terrain_ready_set": {"anchorId": F(int), "centres": F(list)},  # routeahead.py: the route's corridor
-    "update": {"current": F(str), "latest": F(str), "url": F(str)},   # a newer version on GitHub (updates.py)
+    "update": {"current": F(str), "latest": F(str), "url": F(str),   # a newer version on GitHub (updates.py)
+               "dev": F(bool, OPT)},        # (a development build's check: whether the newer one is one too)
     "update_status": {"state": F(str), "text": F(str), "done": F(int, OPT), "total": F(int, OPT),
                       "version": F(str, OPT)},      # the "Update now" download (selfupdate.py)
     "where_result": {"id": F(int), "street": F(str), "place": F(str, OPT), "region": F(str, OPT),

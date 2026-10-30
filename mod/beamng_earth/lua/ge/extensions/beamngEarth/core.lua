@@ -1170,7 +1170,8 @@ local function onMessage(msg)
   elseif t == 'update' then
     -- a newer version on GitHub (server updates.py): said once a session in game, and on the settings page
     if type(msg.latest) == 'string' then
-      updateInfo = { current = tostring(msg.current or ''), latest = msg.latest, url = tostring(msg.url or '') }
+      updateInfo = { current = tostring(msg.current or ''), latest = msg.latest, url = tostring(msg.url or ''),
+        dev = msg.dev == true }     -- (a development build: devbuild.lua)
     end
   elseif t == 'update_status' then
     -- the "Update now" download (server selfupdate.py): progress, ready, error; shown in the update notice
@@ -1740,8 +1741,8 @@ local function drawUpdateNotice()
   local flags = im.WindowFlags_AlwaysAutoResize + im.WindowFlags_NoCollapse + im.WindowFlags_NoSavedSettings
     + im.WindowFlags_NoTitleBar
   if im.Begin('BeamNG.Earth update##beamngEarthUpdate', nil, flags) then
-    im.Text(string.format('BeamNG.Earth %s is available (you have %s).', tostring(updateInfo.latest),
-      tostring(updateInfo.current)))
+    im.Text(string.format('BeamNG.Earth %s%s is available (you have %s).', updateInfo.dev and 'development build ' or '',
+      tostring(updateInfo.latest), tostring(updateInfo.current)))
     local us = updateInfo.status
     if us and us.text ~= '' then
       if us.state == 'progress' and us.total > 0 then
@@ -1821,6 +1822,13 @@ local function drawUi(dt)
       and (st.clock or 0) > (st.loadingUntil or 0) then
     local ok, err = pcall(drawUpdateNotice)
     if not ok then updateInfo = nil; log('E', 'beamngEarth', 'update notice: ' .. tostring(err)) end
+  end
+  -- a development build's notice (devbuild.lua), below the update notice when that one is up
+  if st.inOurLevel and st.active and not credits.hiddenByUi() and (st.clock or 0) > (st.loadingUntil or 0)
+      and lastHello and M._devbuild.isDev(lastHello.appVersion) then
+    local up = updateInfo and not updateHidden and settings.get('updateDismissed') ~= tostring(updateInfo.latest)
+    local ok, err = pcall(M._devbuild.draw, lastHello.appVersion, settings, up and 120 or 12)
+    if not ok then lastHello.appVersion = nil; log('E', 'beamngEarth', 'dev build notice: ' .. tostring(err)) end
   end
 end
 
@@ -2145,6 +2153,7 @@ end
 
 -- After physics, before rendering (main.lua:819-824): measure when a rebase's vehicle move became
 -- visible. Hook order relative to core_camera does not matter here; this only measures.
+M._devbuild = require('beamngEarth/devbuild')    -- the development build's notice (a field: the 200-local limit)
 M._pacer = require('beamngEarth/framepacer')    -- even frame pacing (fields: the main chunk's 200-local limit)
 M._paceClock = stopwatch.clock()
 local function onPreRender(dtReal, dtSim)
