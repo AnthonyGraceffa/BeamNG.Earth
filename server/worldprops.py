@@ -28,14 +28,16 @@ import mapgeom
 # Measured vertex bounds (Z up, metres). Lift is how far the mesh origin sits above the ground.
 # The catalog height is the mesh's vertical size, and the row sends that height so the Forest scale is 1.
 CELL_H, CELL_LIFT = 28.93, 0.02
-# industrial_watertower: the foot pads straddle z=0. A centre pipe reaches -1.29; that pipe is buried,
-# so lifting by it put the feet about four feet in the air. The origin stays on the ground.
-WATER_H, WATER_LIFT = 26.16, 0.0
+# industrial_watertower: the legs rise out of concrete pads whose tops are at z=0.60. A centre pipe
+# reaches -1.29; lifting by that pipe left the feet in the air. Dropping to the pad tops puts the
+# visible feet on the ground and buries the pads.
+WATER_H, WATER_LIFT = 26.16, -0.60
 CONT_H = 2.59
 # dragbillboard: z 0..11.95, the poster centred near the origin and facing local +y.
 BILL_H, BILL_LIFT = 11.95, 0.0
 BILL_OX, BILL_OY = 0.02, 0.14          # the poster's centre, in the mesh's local axes
-BARN_H, BARN_LEN, BARN_LIFT = 8.41, 10.36, 0.45
+# farm_barn: the walls sit on z=0. A foundation reaches -0.45; lifting by it left the walls a few feet up.
+BARN_H, BARN_LEN, BARN_LIFT = 8.41, 10.36, 0.0
 BARN_SCALE = (0.7, 1.75)               # outside this the procedural barn fits better than a scaled mesh
 
 CELL_CLASSES = {"communication_tower", "mobile_phone_tower", "radar"}

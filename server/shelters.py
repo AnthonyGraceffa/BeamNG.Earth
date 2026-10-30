@@ -1,10 +1,11 @@
 """Bus shelters at mapped bus stops (Overture infrastructure class bus_stop).
 
 A stop is a point (highway=bus_stop). It gets East Coast's glass shelter unless the tags say
-shelter=no. The shelter's long side runs along the nearest road and its signed face (local +x)
-points at the carriageway, with the body on the sidewalk. A public-transport shelter that is not a
-bus stop (amenity=shelter, shelter_type=public_transport) is included. A stop with no road nearby
-still stands, turned by its id.
+shelter=no. The shelter's long side runs along the nearest road. The stock shape's signed side
+reads as the forest mesh's opposite of local +x, so the row yaw points local +x away from the
+carriageway and that signed side at the street, with the body on the sidewalk. A public-transport
+shelter that is not a bus stop (amenity=shelter, shelter_type=public_transport) is included. A
+stop with no road nearby still stands, turned by its id.
 """
 import hashlib
 import json
@@ -19,7 +20,8 @@ import mapgeom
 log = logging.getLogger("earthd.shelters")
 
 G_SHELTER = "busshelter"
-# s_busstop_ecu: x -0.74..0.74 (the signed face is +x), y -1.45..1.44 along the curb, z -0.20..2.70.
+# s_busstop_ecu: x -0.74..0.74 (the signed face reads as the forest mesh's -x), y -1.45..1.44 along the curb,
+# z -0.20..2.70.
 STREET_X = 0.74
 LIFT = 0.20
 SHELTER_H = 2.90
@@ -141,7 +143,8 @@ def _closest(roads, x, y):
 
 
 def _place(fid, x, y, roads):
-    """(origin x, y, yaw) with the signed face toward the road and the shelter on the sidewalk."""
+    """(origin x, y, yaw) with the signed face toward the road and the shelter on the sidewalk.
+    Local +x points away from the carriageway: the stock shape's signed side is that axis reversed."""
     hit = _closest(roads, x, y)
     if hit is None:
         return x, y, _yaw_of(fid)
@@ -160,7 +163,7 @@ def _place(fid, x, y, roads):
         fx, fy = cx + away[0] * curb, cy + away[1] * curb
     else:
         fx, fy = x, y
-    return fx - STREET_X * toward[0], fy - STREET_X * toward[1], _yaw(toward[0], toward[1])
+    return fx - STREET_X * toward[0], fy - STREET_X * toward[1], (_yaw(toward[0], toward[1]) + 180.0) % 360.0
 
 
 def rows(frame, infra_fn, box, elev, roads=()):

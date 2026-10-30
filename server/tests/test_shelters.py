@@ -59,7 +59,7 @@ class PlaceTest(unittest.TestCase):
         self.assertEqual(got[0][0], "busshelter")
         self.assertEqual(got[0][6], shelters.SHELTER_H)
         self.assertAlmostEqual(got[0][3], 5.0 + shelters.LIFT, delta=0.02)
-        self.assertAlmostEqual(got[0][4], 270.0, delta=0.5)
+        self.assertAlmostEqual(got[0][4], 90.0, delta=0.5)
         self.assertAlmostEqual(got[0][1], 50.0, delta=0.02)
         self.assertGreater(got[0][2], 8.0)
 
@@ -67,12 +67,12 @@ class PlaceTest(unittest.TestCase):
         got = self.rows(self.stop([[50.0, 1.0]]), self.road())
         self.assertEqual(len(got), 1)
         self.assertGreater(got[0][2], 4.0)
-        self.assertAlmostEqual(got[0][4], 270.0, delta=0.5)
+        self.assertAlmostEqual(got[0][4], 90.0, delta=0.5)
 
     def test_the_other_side_faces_the_other_way(self):
         got = self.rows(self.stop([[50.0, -8.0]]), self.road(), box=(0.0, -20.0, 100.0, 100.0))
         self.assertEqual(len(got), 1)
-        self.assertAlmostEqual(got[0][4], 90.0, delta=0.5)
+        self.assertAlmostEqual(got[0][4], 270.0, delta=0.5)
         self.assertLess(got[0][2], -8.0)
 
     def test_a_stop_tagged_without_a_shelter_is_left_out(self):
