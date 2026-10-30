@@ -51,7 +51,7 @@ REMOTE_FILES = 32               # open RemoteFiles kept (their blocks share rang
 # DuckDB's own prefetching reads whole row groups one after the other; Reader._plan fetches what the
 # query needs in parallel first, so DuckDB reads lazily from the block cache
 PARQUET_CONFIG = {"disable_parquet_prefetching": True}
-FETCH_THREADS = 4               # parallel range requests per Reader (the hosts allow 4 at once)
+FETCH_THREADS = 8               # parallel range requests per Reader (Overture's hosts allow 8 at once each)
 FOOTER_GUESS = 256 * 1024       # bytes read from a file's end first for its footer (one block)
 MERGE_GAP = 64 * 1024           # column chunks closer than this are fetched in one range
 BASE_COLUMNS = {"id", "geometry", "bbox", "sources", "version"}

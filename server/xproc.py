@@ -35,7 +35,7 @@ def take(lock, kind="demand"):
         except FileExistsError:
             try:
                 if time.time() - os.path.getmtime(lock) > STALE_S:
-                    os.remove(lock)         # its process died doing it
+                    release(lock)           # its process died doing it
                     continue
             except OSError:
                 continue                    # (released meanwhile)
@@ -69,6 +69,7 @@ def once(lock, ready, wait_s, kind="demand", on_wait=None):
         return got, False
     t0 = time.monotonic()
     waited = False
+    holder = None
     while True:
         if take(lock, kind):
             got = ready()                   # (written by the process whose lock we just followed)
@@ -76,8 +77,17 @@ def once(lock, ready, wait_s, kind="demand", on_wait=None):
                 release(lock)
                 return got, False
             return None, True
-        if _less_urgent(lock, kind):
-            return None, False              # do it here, not wait
+        # the holder's urgency read once per holder (a lock file of another time or size: a new holder), not at every
+        # poll: on Windows a lock open for reading cannot be removed, and its holder's release failed (below)
+        try:
+            st = os.stat(lock)
+            now_holder = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            now_holder = None
+        if now_holder is not None and now_holder[1] > 0 and now_holder != holder:
+            holder = now_holder
+            if _less_urgent(lock, kind):
+                return None, False          # do it here, not wait
         if not waited:
             waited = True
             if on_wait is not None:
@@ -90,8 +100,22 @@ def once(lock, ready, wait_s, kind="demand", on_wait=None):
             return got, False
 
 
+RELEASE_S = 2.0         # s a release keeps trying to remove its lock file
+
+
 def release(lock):
-    try:
-        os.remove(lock)
-    except OSError:
-        pass
+    """Remove the lock file. On Windows a file another process has open (a waiter reading its urgency) cannot be
+    removed: tried again for up to RELEASE_S. A failed remove left the lock behind, so every process wanting that piece
+    waited out its wait_s and the next ones STALE_S (road tiles "building for 90 s", the road workers "stuck", on
+    Windows since the locks came in 1.6.1: GitHub #435, PR #481's diagnosis)."""
+    t0 = time.monotonic()
+    while True:
+        try:
+            os.remove(lock)
+            return
+        except FileNotFoundError:
+            return
+        except OSError:
+            if time.monotonic() - t0 > RELEASE_S:
+                return
+            time.sleep(0.01)

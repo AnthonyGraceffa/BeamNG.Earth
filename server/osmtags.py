@@ -30,6 +30,7 @@ import numpy as np
 import netfetch
 import overture
 import rangeread
+import xproc
 
 log = logging.getLogger("earthd.mapdata")
 
@@ -61,6 +62,12 @@ COLUMNS = {
     "osm_highway": "CASE WHEN highway IN ('construction', 'proposed') THEN highway END",
     "bx0": "bbox.xmin", "by0": "bbox.ymin", "bx1": "bbox.xmax", "by1": "bbox.ymax",
 }
+TEXT_COLUMNS = {"sidewalk", "lit", "smoothness", "osm_surface", "osm_oneway", "name", "osm_highway"}
+INT_COLUMNS = {"lanes", "osm_layer"}
+TABLE_DIR = "rg"        # a row group's decoded ways (OsmTags._table), in the version's folder
+TABLE_MEM = 6           # decoded row groups kept in memory (~6 MB each; a place's cells share 3-5)
+EXACT32 = {"bx0", "by0", "bx1", "by1", "lanes", "osm_layer"}   # float32 (the file's bbox; small integers)
+TABLE_WAIT_S = 60.0     # a row group another process decodes is waited for this long
 USED = {"id", "bbox", "lanes", "width", "maxspeed", "sidewalk", "lit", "smoothness", "surface", "oneway", "layer", "name"}
 FLOATS = ("lanes", "width", "maxspeed", "osm_layer")
 TEXTS = ("sidewalk", "lit", "smoothness", "osm_surface", "osm_oneway", "osm_highway")
@@ -91,6 +98,7 @@ class OsmTags:
         self._checked = 0.0
         self._reader = overture.Reader(raw_dir, fetcher)
         self._meta = None           # (RemoteFile, row groups) of the version in use: _groups
+        self._tables = {}           # (id(RemoteFile), row group) -> its decoded ways (_table), least recent first
 
     def version(self, kind="demand"):
         """(etag, RemoteFile) of the version in use: the one pinned on disk while fresh, else the server's."""
@@ -203,6 +211,71 @@ class OsmTags:
                 if stat(g, "xmin", 0, -1e9) <= lon1 and stat(g, "xmax", 1, 1e9) >= lon0
                 and stat(g, "ymin", 0, -1e9) <= lat1 and stat(g, "ymax", 1, 1e9) >= lat0]
 
+    def _table(self, con, uri, groups, rg, remote, kind):
+        """Row group rg's ways with a tag the roads use (or highway=raceway): {"id", "race", "frn", COLUMNS..., and for
+        a text column "<c>_off" (its UTF-8 bytes' offsets) and "<c>_ok" (not NULL)} as arrays, NaN for a missing number.
+        Decoded once per version: kept in memory (TABLE_MEM) and in the version's folder (TABLE_DIR, the other
+        processes read it; xproc: one decodes)."""
+        k = (id(remote), rg)
+        with self._lock:
+            t = self._tables.pop(k, None)
+            if t is not None:
+                self._tables[k] = t             # (most recently used last)
+                return t
+        path = os.path.join(remote.cache_dir, TABLE_DIR, f"{int(rg)}.npz")
+
+        def load():
+            try:
+                with np.load(path, allow_pickle=False) as f:
+                    return {c: f[c] for c in f.files}
+            except (OSError, ValueError, KeyError):
+                return None
+        t, mine = xproc.once(path + ".lock", load, TABLE_WAIT_S, kind)
+        if t is None:
+            try:
+                t = self._decode(con, uri, groups, rg, remote, kind)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                tmp = f"{path}.{os.getpid()}.{threading.get_ident()}.tmp.npz"
+                np.savez_compressed(tmp, **t)
+                os.replace(tmp, path)
+            finally:
+                if mine:
+                    xproc.release(path + ".lock")
+        with self._lock:
+            self._tables[k] = t
+            while len(self._tables) > TABLE_MEM:
+                self._tables.pop(next(iter(self._tables)))
+        return t
+
+    def _decode(self, con, uri, groups, rg, remote, kind):
+        g = groups[rg]
+        rd = self._reader
+        want = {c for c in g["cols"] if c in USED or c == "highway"}
+        rd._fetch({PATH: remote}, {PATH: [r for c, rs in g["cols"].items() if c in want for r in rs]}, kind)
+        cols = ", ".join(f"{expr} AS \"{name}\"" for name, expr in COLUMNS.items())
+        # only the ways with a tag the roads use (and the raceways): join() treats a way without one as one not
+        # here, and building a dict per way of every highway in the cell was most of this thread's CPU
+        # (osmtags, 14 CPU-s of a Deck's teleport, 2026-10-23)
+        some = " OR ".join([f"{c} IS NOT NULL" for c in sorted(USED - {"id", "bbox"})]
+                           + [f"highway IN ({', '.join(repr(v) for v in UNBUILT)})"])
+        got = con.execute(f"""SELECT id, highway = 'raceway', file_row_number, {cols}
+            FROM read_parquet({uri}, file_row_number = true)
+            WHERE file_row_number BETWEEN {g['first']} AND {g['first'] + g['n'] - 1}
+            AND (highway = 'raceway' OR {some})""").fetchall()
+        t = {"id": np.array([r[0] for r in got], np.int64), "race": np.array([bool(r[1]) for r in got], bool),
+             "frn": np.array([r[2] for r in got], np.int64)}
+        for j, name in enumerate(COLUMNS, 3):
+            vals = [r[j] for r in got]
+            if name in TEXT_COLUMNS:          # (one UTF-8 blob and offsets: fixed-width strings took ~20 MB)
+                enc = [b"" if v is None else str(v).encode("utf-8") for v in vals]
+                t[name + "_ok"] = np.array([v is not None for v in vals], bool)
+                t[name + "_off"] = np.concatenate([[0], np.cumsum([len(b) for b in enc])]).astype(np.int32)
+                t[name] = np.frombuffer(b"".join(enc), np.uint8)
+            else:
+                t[name] = np.array([np.nan if v is None else float(v) for v in vals],
+                                   np.float32 if name in EXACT32 else np.float64)
+        return t
+
     def _cell(self, remote, bounds, kind):
         lon0, lat0, lon1, lat1 = bounds
         rd = self._reader
@@ -214,22 +287,19 @@ class OsmTags:
             cand = self._candidates(groups, bounds)
             if not cand:
                 return {}, []
-            want = {c for rg in cand for c in groups[rg]["cols"] if c in USED or c == "highway"}
-            rd._fetch(files, {PATH: [r for rg in cand for c, rs in groups[rg]["cols"].items() if c in want
-                                     for r in rs]}, kind)
-            only = " OR ".join(f"file_row_number BETWEEN {groups[rg]['first']} AND "
-                               f"{groups[rg]['first'] + groups[rg]['n'] - 1}" for rg in cand)
-            box = (f"bbox.xmin <= {lon1!r} AND bbox.xmax >= {lon0!r} AND bbox.ymin <= {lat1!r} "
-                   f"AND bbox.ymax >= {lat0!r}")
-            cols = ", ".join(f"{expr} AS \"{name}\"" for name, expr in COLUMNS.items())
-            # only the ways with a tag the roads use (and the raceways): join() treats a way without one as one not
-            # here, and building a dict per way of every highway in the cell was most of this thread's CPU
-            # (osmtags, 14 CPU-s of a Deck's teleport, 2026-10-23)
-            some = " OR ".join([f"{c} IS NOT NULL" for c in sorted(USED - {"id", "bbox"})]
-                               + [f"highway IN ({', '.join(repr(v) for v in UNBUILT)})"])
-            rows = con.execute(f"""SELECT id, highway = 'raceway', file_row_number, {cols}
-                FROM read_parquet({uri}, file_row_number = true)
-                WHERE ({only}) AND {box} AND (highway = 'raceway' OR {some})""").fetchall()
+            # each row group decoded once (_table) and the cell's ways picked from it by their bbox: the file is
+            # spatially clustered, so a place's cells share a few row groups (81 cells round Nottingham: 243 decodes
+            # of 3 row groups), and the decoding was most of this thread's CPU (23 CPU-s of a teleport, 2026-10-30)
+            rows = []
+            for rg in cand:
+                t = self._table(con, uri, groups, rg, remote, kind)
+                if not len(t["id"]):
+                    continue
+                # (in float32, as the file's bbox and DuckDB's comparison with it: a way whose box ends on the cell's edge)
+                b = np.float32
+                m = np.flatnonzero((t["bx0"].astype(b) <= b(lon1)) & (t["bx1"].astype(b) >= b(lon0))
+                                   & (t["by0"].astype(b) <= b(lat1)) & (t["by1"].astype(b) >= b(lat0)))
+                rows.extend(_rows(t, m))
             race = [r[2] for r in rows if r[1]]
             got = []
             if race:            # (rare: the raceways' own columns and geometry, of their row groups only)
@@ -263,6 +333,23 @@ class OsmTags:
             d["coords"] = coords
             ways.append(d)
         return tags, ways
+
+def _rows(t, idx):
+    """Rows idx of a decoded row group (OsmTags._table) as (id, raceway, file row, COLUMNS' values (None: missing))."""
+    names = list(COLUMNS)
+    out = []
+    for i in idx:
+        vals = []
+        for c in names:
+            if c in TEXT_COLUMNS:
+                o = t[c + "_off"]
+                vals.append(t[c][o[i]:o[i + 1]].tobytes().decode("utf-8") if t[c + "_ok"][i] else None)
+            else:
+                v = float(t[c][i])
+                vals.append(None if v != v else (int(v) if c in INT_COLUMNS else v))
+        out.append((int(t["id"][i]), bool(t["race"][i]), int(t["frn"][i]), *vals))
+    return out
+
 
 RACEWAY_PAVED = {"", "asphalt", "concrete", "paved", "chipseal"}
 
