@@ -246,6 +246,10 @@ ROUTE_RETRY_S = 2.0               # a deferred tile/cell backs off this long bef
 FAST_BASE_V = 70.0              # m/s (157 mph): faster, a block waits at most BASE_FAST_WAIT_S for its photo after its
 BASE_FAST_WAIT_S = 0.15         # heights, then goes without it (block_base later): blocks took 0.6-3 s at 600 mph on a
                                 # Steam Deck, mostly the photo (heights 0.1-0.4 s), and the game paused 11 times a minute
+BASE_WAIT_S = 0.5               # ... and at any speed this long: a 4-core PC's photos took ~26 s while the car was held at
+                                # the edge of its ground for 10-20 s (GitHub #496), and the wait held a heightmap thread
+                                # (the next block's heights waited behind it); a block asked for ahead gets its photo
+                                # before its commit anyway (block_base), the one under a waiting car goes without it
 FAST_KEEP_S = 20.0              # ... and this long after it last was: a car the game holds for its ground (the drop
                                 # hold, the edge guard) reports no speed, and its next block waited for its photo
                                 # again (5-10 s at 500 mph on a first visit, Indianapolis 2026-10-30: held half the time)
@@ -2183,10 +2187,10 @@ class Server:
         future from _base_photo, started with the heights), the timings."""
         if base is not None:
             t1 = time.perf_counter()
-            if self.fast and not base.done():
-                concurrent.futures.wait([base], timeout=BASE_FAST_WAIT_S)
-            if self.fast and not base.done():
-                # a fast player (FAST_BASE_V): the block goes now and its photo when done (block_base)
+            if not base.done():
+                concurrent.futures.wait([base], timeout=BASE_FAST_WAIT_S if self.fast else BASE_WAIT_S)
+            if not base.done():
+                # the block goes now and its photo when done (block_base)
                 info["base"] = None
                 info["stages"]["baseWait"] = time.perf_counter() - t1
                 info["stages"]["baseLater"] = 1.0
@@ -2206,10 +2210,10 @@ class Server:
         return info
 
     def _base_later(self, key, fut, tries=4):
-        """A block sent without its photo (a fast player): the photo, once rendered, onto the block's entry (later
+        """A block sent without its photo (not done BASE_WAIT_S after its heights): the photo, once rendered, onto the block's entry (later
         terrain_ready answers) and to the mod (block_base: the block in use takes it now, a ready one at its commit)."""
         try:
-            name = fut.result()[0]
+            name, photo, _ = fut.result()
         except Exception:
             return
         conns = [c for c in list(self.connections) if getattr(c, "loop", None) is not None]
@@ -2225,6 +2229,13 @@ class Server:
                 return
             if info is not None and not info.get("base"):
                 info["base"] = name
+                if photo and info.get("layers") and info.get("ter"):
+                    # lawns only where the photo is green (_finish_heightmap), in time for a block not committed
+                    # yet (the mod reads its .ter at the commit; one in use keeps its lawns until it is read again)
+                    try:
+                        surfacemod.photo_lawns(self.out_dir, info["ter"], info["layers"], photo[0])
+                    except Exception as e:
+                        log.info("photo lawns %s: %s", key, e)
             for c in list(self.connections):    # (the mod drops another anchor's)
                 c.send({"type": "block_base", "anchorId": key[0], "cx": key[1], "cy": key[2],
                         "base": f"{self.vfs_dir}/{name}", "baseSize": size})

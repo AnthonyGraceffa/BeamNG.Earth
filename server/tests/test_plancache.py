@@ -134,5 +134,38 @@ class PlanCacheTest(unittest.TestCase):
         self.assertEqual(os.listdir(root), ["new"], "a run still writing (its newest folder) is kept")
 
 
+class LockTest(unittest.TestCase):
+    def setUp(self):
+        self.dir = tempfile.mkdtemp()
+        self.lock = os.path.join(self.dir, "x.lock")
+
+    def tearDown(self):
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def test_release_tries_again_while_the_file_is_open_elsewhere(self):
+        # Windows: a lock another process has open cannot be removed (WinError 32); a release that gave up at once left
+        # the lock behind and every process after it waited (GitHub #435)
+        self.assertTrue(xproc.take(self.lock))
+        real, calls = os.remove, []
+
+        def busy(path):
+            calls.append(path)
+            if len(calls) < 3:
+                raise PermissionError(32, "in use")
+            real(path)
+        with mock.patch.object(xproc.os, "remove", busy):
+            xproc.release(self.lock)
+        self.assertEqual(len(calls), 3)
+        self.assertFalse(os.path.exists(self.lock))
+
+    def test_waiter_reads_the_holders_urgency_once(self):
+        self.assertTrue(xproc.take(self.lock, "demand"))
+        with mock.patch.object(xproc, "_less_urgent", wraps=xproc._less_urgent) as lu:
+            got, mine = xproc.once(self.lock, lambda: None, 0.3, "demand")
+        self.assertEqual((got, mine), (None, False), "waited out wait_s")
+        self.assertEqual(lu.call_count, 1)
+        xproc.release(self.lock)
+
+
 if __name__ == "__main__":
     unittest.main()
