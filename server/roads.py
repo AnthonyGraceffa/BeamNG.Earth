@@ -7401,7 +7401,7 @@ class GeoTracker:
         reach = TILE / 2 * math.sqrt(2.0)
         out = set()
         for tx, ty in tiles_near(x, y, r):
-            ks = geotiles.tiles_near(frame, (tx + 0.5) * TILE, (ty + 0.5) * TILE, reach)
+            ks = geotiles.tiles_near(frame, (tx + 0.5) * TILE, (ty + 0.5) * TILE, reach, exact=True)
             if all(((a, b) in self.sent and (a, b) in self.skins) or (a, b) in self.retry for a, b, _ in ks):
                 out.add((tx, ty))
         return out

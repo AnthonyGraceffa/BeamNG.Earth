@@ -2243,6 +2243,12 @@ class Server:
         info["zoom"] = anchor.hm_zoom
         return info
 
+    def _photo_lawns(self, key, ter, layers, rgb):
+        try:
+            surfacemod.photo_lawns(self.out_dir, ter, layers, rgb)
+        except Exception as e:
+            log.info("photo lawns %s: %s", key, e)
+
     def _quick_later(self, anchor, cx, cy):
         """quick_pool: a block sent without its photo gets its stand-in (write_quick_base) onto its entry and to the mod
         (block_base) unless its own photo came first. Off the block's thread: made there it held each block ~1.5 s,
@@ -2295,11 +2301,9 @@ class Server:
                 info["base"] = name
                 if photo and info.get("layers") and info.get("ter"):
                     # lawns only where the photo is green (_finish_heightmap), in time for a block not committed
-                    # yet (the mod reads its .ter at the commit; one in use keeps its lawns until it is read again)
-                    try:
-                        surfacemod.photo_lawns(self.out_dir, info["ter"], info["layers"], photo[0])
-                    except Exception as e:
-                        log.info("photo lawns %s: %s", key, e)
+                    # yet (the mod reads its .ter at the commit; one in use keeps its lawns until it is read again);
+                    # off the event loop (7.6 s of a Steam Deck's loop in a drive)
+                    self.quick_pool.submit(self._photo_lawns, key, info["ter"], info["layers"], photo[0])
             for c in list(self.connections):    # (the mod drops another anchor's)
                 c.send({"type": "block_base", "anchorId": key[0], "cx": key[1], "cy": key[2],
                         "base": f"{self.vfs_dir}/{name}", "baseSize": size})
