@@ -163,7 +163,12 @@ jobs:
             echo "check offers the next development build (or the next beta, when that is newer)."
             echo
             echo "### Changes since ${prev:-the last builds}"
-            git log --no-merges --format='- %s' $range | cut -c1-300
+            git log --no-merges --format='%s' $range | grep -v '^VERSION ' \
+              | awk '{ if (length($0) > 200) $0 = substr($0, 1, 197) "..."; print "- " $0 }'
+            if [ -n "$prev" ]; then
+              echo
+              echo "Full list of changes: https://github.com/${{ github.repository }}/compare/$prev...v$v"
+            fi
           } > notes.md
           gh release create "v$v" out/linux/* out/windows/* dist/BeamNG.Earth-BeamMP-Server-*.zip \
             --target "$GITHUB_SHA" --title "BeamNG.Earth $v (development build)" --notes-file notes.md --prerelease
