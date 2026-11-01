@@ -1246,6 +1246,50 @@ class InGroundTest(unittest.TestCase):
         self.assertGreater(float(F[at & inner, 1].min()), 0.4, "a tile edge in the middle of the road stays solid")
         self.assertLess(float(F[at & inner, 1].max()), 0.6, "a tile edge in the middle of the road stays solid")
 
+    def test_a_sharp_dirt_bend_sweeps_and_meets_across_the_seam(self):
+        import roadmesh
+        turn = math.radians(50)
+        bend = (250.0 + 80.0 * math.cos(turn), 80.0 + 80.0 * math.sin(turn))
+        road = features([[(80.0, 80.0), (250.0, 80.0), bend]], ["track"], ids=["bend"])
+
+        def turns(tx):
+            chunks = [c for c in roads.build_tile(FRAME, tx, 0, [road], flat) if c["m"] in roads.DIRT_VARIATIONS]
+            self.assertTrue(chunks)
+            got = []
+            for left, right, *_rest in roadmesh.ribbons(chunks):
+                for edge in (left, right):
+                    got.append(_edge_turn_max(edge))
+            return max(got)
+
+        self.assertLess(turns(0), roadmesh.DIRT_BEND_STEP_DEG + 2.0)
+        x0, y0, x1, y1 = roads.tile_bbox(0, 0)
+        m0 = roadmesh.build(FRAME, [c for c in roads.build_tile(FRAME, 0, 0, [road], flat)
+                                     if c["m"] in roads.DIRT_VARIATIONS],
+                             flat, (x0, y0, 0.0), clip=(x0, y0, x1, y1))
+        x0, y0, x1, y1 = roads.tile_bbox(1, 0)
+        m1 = roadmesh.build(FRAME, [c for c in roads.build_tile(FRAME, 1, 0, [road], flat)
+                                     if c["m"] in roads.DIRT_VARIATIONS],
+                             flat, (x0, y0, 0.0), clip=(x0, y0, x1, y1))
+
+        def seam(mesh, origin_x):
+            P = mesh[0]
+            at = np.abs(P[:, 0] + origin_x - roads.TILE) < 0.15
+            self.assertTrue(at.any(), "the strip crosses the tile edge")
+            return float(P[at, 1].min()), float(P[at, 1].max())
+
+        a0, a1 = seam(m0, 0.0), seam(m1, roads.TILE)
+        self.assertLess(abs(a0[0] - a1[0]), 0.25)
+        self.assertLess(abs(a0[1] - a1[1]), 0.25)
+
+
+def _edge_turn_max(edge):
+    e = np.diff(edge, axis=0)
+    L = np.hypot(e[:, 0], e[:, 1])
+    e = e[L > 0.05]
+    t = e / np.hypot(e[:, 0], e[:, 1])[:, None]
+    cr = t[:-1, 0] * t[1:, 1] - t[:-1, 1] * t[1:, 0]
+    return float(np.abs(np.degrees(np.arctan2(cr, (t[:-1] * t[1:]).sum(1)))).max())
+
 
 class NearNodePairsTest(unittest.TestCase):
     def test_the_grid_gives_the_all_pairs_scans_pairs_in_its_order(self):

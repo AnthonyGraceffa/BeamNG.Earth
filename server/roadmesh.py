@@ -22,6 +22,18 @@ import numpy as np
 import cdae
 
 DRAPE_STEP = 2.0        # m between ribbon cross-sections (the physics block's lattice)
+# A dirt or gravel strip follows the mapped vertices, so a bend is one mitre and the ruts kink (a desert
+# track, the user's shot). round_dirt_centerline replaces a bend sharper than DIRT_BEND_DEG with an arc of
+# radius DIRT_BEND_R, cut into DIRT_BEND_STEP_DEG pieces, using the mapped segments (not the 12 m densify,
+# which left only a few metres of arm and a corner a truck cannot take). The inner edge may sit
+# DIRT_EDGE_SLACK m past the graded half-width. A bend whose arms cannot hold an arc that still has
+# DIRT_INNER_MIN inside it keeps its point; _dirt_ribbon rounds the outside edge there.
+DIRT_BEND_DEG = 10.0
+DIRT_BEND_STEP_DEG = 5.0
+DIRT_BEND_R = 28.0          # m, a bend a vehicle follows instead of a polygon joint
+DIRT_BEND_SEG = 0.85        # share of a segment its two corners may use between them
+DIRT_INNER_MIN = 0.4        # m of radius left inside the arc, so the inner edge does not pinch away
+DIRT_EDGE_SLACK = 12.0      # m the inner edge may sit past the graded carriageway
 LIFT = {"base": 0.0, "edge": 0.003, "gutter": 0.005, "mark": 0.01}   # m above the physics ground (lifted under roads
                                                         # by grading.ROAD_LIFT over the visible ground)
 
@@ -74,6 +86,215 @@ def _normals(xy):
     return n
 
 
+def _push_xy(out, p):
+    q = np.asarray(p, np.float64)
+    if len(out) and float(np.hypot(*(q[:2] - out[-1][:2]))) < 1e-3:
+        return
+    out.append(q)
+
+
+def _dirt_arc(a, b, c, d, radius):
+    """Arc points (m, 3) of radius `radius` tangent `d` m back from corner b along ab and bc. Pure."""
+    ab, bc = b[:2] - a[:2], c[:2] - b[:2]
+    lab, lbc = float(np.hypot(*ab)), float(np.hypot(*bc))
+    if lab < 1e-6 or lbc < 1e-6 or d < 1e-3 or radius < 1e-3:
+        return None
+    t0, t1 = ab / lab, bc / lbc
+    delta = math.atan2(t0[0] * t1[1] - t0[1] * t1[0], float(np.dot(t0, t1)))
+    if abs(delta) < 1e-4:
+        return None
+    d = min(d, lab * 0.98, lbc * 0.98)
+    T0, T1 = b[:2] - t0 * d, b[:2] + t1 * d
+    z0 = float(a[2] + (b[2] - a[2]) * ((lab - d) / lab))
+    z1 = float(b[2] + (c[2] - b[2]) * (d / lbc))
+    n0 = np.array([-t0[1], t0[0]])
+    side = 1.0 if delta > 0.0 else -1.0
+    centre = T0 + side * n0 * radius
+    a0 = math.atan2(T0[1] - centre[1], T0[0] - centre[0])
+    nsteps = max(1, int(math.ceil(abs(delta) / math.radians(DIRT_BEND_STEP_DEG))))
+    pts = np.empty((nsteps + 1, 3), np.float64)
+    for k in range(nsteps + 1):
+        ang = a0 + delta * (k / nsteps)
+        pts[k, :2] = centre + radius * np.array([math.cos(ang), math.sin(ang)])
+        pts[k, 2] = z0 + (z1 - z0) * (k / nsteps)
+    return pts
+
+
+def round_dirt_centerline(pts, half):
+    """pts (k, 3) with each sharp bend replaced by an arc of about DIRT_BEND_R (less on a short arm, or where a
+    wider arc would put the inner edge more than DIRT_EDGE_SLACK past the graded width). The ends stay. Pure."""
+    P = np.asarray(pts, np.float64)
+    n = len(P)
+    half = float(half)
+    if n < 3 or half <= 0.05:
+        return P
+    seg = np.hypot(np.diff(P[:, 0]), np.diff(P[:, 1]))
+    want = [None] * n                 # (alpha,) for a corner we may round
+    back, fwd = np.zeros(n), np.zeros(n)
+    limit = math.radians(DIRT_BEND_DEG)
+    for i in range(1, n - 1):
+        lab, lbc = float(seg[i - 1]), float(seg[i])
+        if lab < 0.5 or lbc < 0.5:
+            continue
+        t0 = (P[i, :2] - P[i - 1, :2]) / lab
+        t1 = (P[i + 1, :2] - P[i, :2]) / lbc
+        delta = math.atan2(t0[0] * t1[1] - t0[1] * t1[0], float(np.dot(t0, t1)))
+        if abs(delta) <= limit:
+            continue
+        alpha = abs(delta) / 2.0
+        cos_a = math.cos(alpha)
+        bend = 1.0 - cos_a
+        if cos_a < 1e-3 or bend < 1e-8:
+            continue
+        radius = min(DIRT_BEND_R, half + DIRT_EDGE_SLACK / bend)
+        d = radius * math.tan(alpha)
+        want[i] = alpha
+        back[i] = d
+        fwd[i] = d
+    for i in range(n - 1):
+        budget = DIRT_BEND_SEG * float(seg[i])
+        need = float(fwd[i] + back[i + 1])
+        if budget <= 1e-6:
+            fwd[i] = 0.0
+            back[i + 1] = 0.0
+        elif need > budget:
+            scale = budget / need
+            fwd[i] *= scale
+            back[i + 1] *= scale
+    arcs = [None] * n
+    hit = False
+    for i in range(1, n - 1):
+        if want[i] is None:
+            continue
+        d = float(min(back[i], fwd[i]))
+        alpha = want[i]
+        if d < 0.3:
+            continue
+        radius = d / math.tan(alpha)
+        if radius < half + DIRT_INNER_MIN:
+            continue
+        arc = _dirt_arc(P[i - 1], P[i], P[i + 1], d, radius)
+        if arc is not None:
+            arcs[i] = arc
+            hit = True
+    if not hit:
+        return P
+    out = [P[0]]
+    i = 0
+    while i < n - 1:
+        j = i + 1
+        if j < n - 1 and arcs[j] is not None:
+            for p in arcs[j]:
+                _push_xy(out, p)
+        else:
+            _push_xy(out, P[j])
+        i = j
+    if len(out) < 2:
+        return P
+    return np.asarray(out, np.float64)
+
+
+def _densify_keep(pts, step):
+    """pts (k, 3) with points added on any segment longer than `step` m; every existing point kept. Pure."""
+    P = np.asarray(pts, np.float64)
+    if len(P) < 2:
+        return P
+    out = [P[0]]
+    for i in range(len(P) - 1):
+        a, b = P[i], P[i + 1]
+        L = float(np.hypot(*(b[:2] - a[:2])))
+        if L < 1e-4:
+            continue
+        nseg = max(1, int(math.ceil(L / step)))
+        for s in range(1, nseg + 1):
+            _push_xy(out, a + (b - a) * (s / nseg))
+    if float(np.hypot(*(P[-1][:2] - out[-1][:2]))) > 1e-3:
+        out.append(P[-1])
+    return np.asarray(out, np.float64)
+
+
+def _rot2(v, ang):
+    c, s = math.cos(ang), math.sin(ang)
+    return np.array([c * v[0] - s * v[1], s * v[0] + c * v[1]])
+
+
+def _inner_meet(b, n_in, n_out, half, inside):
+    """Where the two inside edges meet, or a clamped mitre when that point runs off (a hairpin)."""
+    t_in = np.array([n_in[1], -n_in[0]])
+    t_out = np.array([n_out[1], -n_out[0]])
+    p = b + inside * n_in * half
+    q = b + inside * n_out * half
+    det = t_in[0] * t_out[1] - t_in[1] * t_out[0]
+    if abs(det) > 1e-8:
+        rhs = q - p
+        u = (rhs[0] * t_out[1] - rhs[1] * t_out[0]) / det
+        inner = p + u * t_in
+        if float(np.hypot(*(inner - b))) <= 2.0 * half:
+            return inner
+    bis = n_in + n_out
+    bl = float(np.hypot(*bis))
+    return b + inside * (bis / bl if bl > 1e-9 else n_in) * half
+
+
+def _dirt_ribbon(pts, half):
+    """(left (k, 2), right, s (k,), z (k,)) of a dirt or gravel strip. The centreline's arcs (round_dirt_centerline)
+    are kept, long segments cut to DRAPE_STEP. A bend still sharper than DIRT_BEND_DEG keeps its point: the outside
+    edge is an arc of radius `half` and the inside edges meet at one point. Pure."""
+    P = _densify_keep(np.asarray(pts, np.float64)[:, :3], DRAPE_STEP)
+    if len(P) < 2:
+        return None
+    xy, z = P[:, :2], P[:, 2]
+    dxy = np.diff(xy, axis=0)
+    L = np.hypot(dxy[:, 0], dxy[:, 1])
+    tang = dxy / np.maximum(L, 1e-9)[:, None]
+    ns = np.stack([-tang[:, 1], tang[:, 0]], axis=1)
+    s = np.concatenate([[0.0], np.cumsum(L)])
+    max_turn = math.radians(DIRT_BEND_DEG)
+    step = math.radians(DIRT_BEND_STEP_DEG)
+    half = float(half)
+    out_l, out_r, out_z, out_s = [], [], [], []
+
+    def emit(left, right, pz, ps):
+        out_l.append(np.asarray(left, np.float64))
+        out_r.append(np.asarray(right, np.float64))
+        out_z.append(float(pz))
+        out_s.append(float(ps))
+
+    def emit_n(pxy, pz, ps, nrm):
+        emit(pxy + nrm * half, pxy - nrm * half, pz, ps)
+
+    emit_n(xy[0], z[0], s[0], ns[0])
+    for i in range(1, len(xy) - 1):
+        if L[i - 1] < 1e-6 or L[i] < 1e-6:
+            emit_n(xy[i], z[i], s[i], ns[min(i, len(ns) - 1)])
+            continue
+        cross = tang[i - 1, 0] * tang[i, 1] - tang[i - 1, 1] * tang[i, 0]
+        ang = math.atan2(cross, float(np.dot(tang[i - 1], tang[i])))
+        if abs(ang) <= max_turn:
+            msum = ns[i - 1] + ns[i]
+            ml = float(np.hypot(*msum))
+            if ml < 1e-9:
+                nrm = ns[i]
+            else:
+                msum = msum / ml
+                nrm = msum / min(1.0, max(0.5, float(np.dot(msum, ns[i]))))
+            emit_n(xy[i], z[i], s[i], nrm)
+        else:
+            inside = 1.0 if ang > 0.0 else -1.0
+            inner = _inner_meet(xy[i], ns[i - 1], ns[i], half, inside)
+            nsteps = max(1, int(math.ceil(abs(ang) / step)))
+            for k in range(nsteps + 1):
+                nrm = _rot2(ns[i - 1], ang * (k / nsteps))
+                outer = xy[i] - inside * nrm * half
+                if inside > 0.0:
+                    emit(inner, outer, z[i], s[i])
+                else:
+                    emit(outer, inner, z[i], s[i])
+    emit_n(xy[-1], z[-1], s[-1], ns[-1])
+    return (np.asarray(out_l, np.float64), np.asarray(out_r, np.float64),
+            np.asarray(out_s, np.float64), np.asarray(out_z, np.float64))
+
+
 def ribbon_pairs(chunks):
     """[(ribbon, its chunk)]: ribbons() of each chunk with it (ribbons() leaves out a chunk too short)."""
     return [(r, c) for c in chunks for r in ribbons([c])]
@@ -101,6 +322,13 @@ def ribbons(chunks):
     for k, c in enumerate(chunks):
         p = np.asarray(c["n"], np.float64)
         if len(p) < 2:
+            continue
+        if "slen" in c and not c.get("fixed"):
+            ribbon = _dirt_ribbon(p[:, :3], float(c["w"]) / 2.0)
+            if ribbon is None:
+                continue
+            left, right, s, _z = ribbon
+            out[k] = (left, right, _ribbon_v(s, c), c["m"], layer_of(c), None)
             continue
         if c.get("deck") and c.get("fixed"):
             xy, s, z = _resample(p, DRAPE_STEP, keep_vertices=True)

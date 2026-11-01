@@ -489,3 +489,88 @@ class BridgeProfilesTest(unittest.TestCase):
         k = 5                                   # ramp point 20 m from the split, 2.4 m off the mainline
         j = int(np.argmin(np.abs(main[:, 0] - ramp[k, 0])))
         self.assertLess(abs(out[1][k] - out[0][j]), abs(zs[1][k] - zs[0][j]) / 2 + 1e-9)
+
+
+def _edge_turns(xy):
+    """Absolute turn (degrees) at each joint of a polyline, ignoring steps under 5 cm."""
+    d = np.diff(np.asarray(xy, np.float64)[:, :2], axis=0)
+    L = np.hypot(d[:, 0], d[:, 1])
+    d = d[L > 0.05]
+    if len(d) < 2:
+        return np.zeros(0)
+    t = d / np.hypot(d[:, 0], d[:, 1])[:, None]
+    cross = t[:-1, 0] * t[1:, 1] - t[:-1, 1] * t[1:, 0]
+    return np.abs(np.degrees(np.arctan2(cross, (t[:-1] * t[1:]).sum(1))))
+
+
+def _dist_to_line(points, line):
+    a, b = line[:-1, :2], line[1:, :2]
+    ab = b - a
+    L2 = np.maximum((ab * ab).sum(1), 1e-12)
+    pts = np.asarray(points, np.float64)[:, :2]
+    u = np.clip(((pts[:, None, :] - a[None]) * ab[None]).sum(2) / L2[None], 0.0, 1.0)
+    q = a[None] + u[..., None] * ab[None]
+    return np.hypot(*(q - pts[:, None, :]).transpose(2, 0, 1)).min(1)
+
+
+def _bend(turn_deg, arm=80.0, half=1.75):
+    turn = math.radians(turn_deg)
+    end = np.array([arm, 0.0]) + arm * np.array([math.cos(turn), math.sin(turn)])
+    return np.array([[0.0, 0.0, 0.0], [arm, 0.0, 0.0], [end[0], end[1], 0.0]]), half
+
+
+def _dirt(pts, w=3.5):
+    c = chunk("bne_dirt_variation_01", w, pts, tl=56.0)
+    c.update(slen=1000.0, s0=0.0, s1=100.0)
+    return c
+
+
+class DirtCornerTest(unittest.TestCase):
+    """A dirt bend is a wide arc. A few metres of radius still reads as a kink in the ruts."""
+
+    def test_a_moderate_bend_sweeps_wide_of_the_corner(self):
+        src, half = _bend(50)
+        out = roadmesh.round_dirt_centerline(src, half)
+        dist = np.hypot(out[:, 0] - 80, out[:, 1])
+        self.assertGreater(dist.min(), 2.0, "the ruts leave the mapped corner")
+        self.assertLess(_edge_turns(out).max(), roadmesh.DIRT_BEND_STEP_DEG + 0.5)
+        left, right = roadmesh.ribbons([_dirt(out, 2 * half)])[0][:2]
+        self.assertLess(max(_edge_turns(left).max(), _edge_turns(right).max()),
+                        roadmesh.DIRT_BEND_STEP_DEG + 1.0)
+        off = max(_dist_to_line(left, src).max(), _dist_to_line(right, src).max())
+        self.assertLess(off, half + roadmesh.DIRT_EDGE_SLACK + 0.15)
+
+    def test_a_square_corner_on_long_arms_is_not_a_joint(self):
+        src, half = _bend(90)
+        out = roadmesh.round_dirt_centerline(src, half)
+        dist = np.hypot(out[:, 0] - 80, out[:, 1])
+        self.assertGreater(dist.min(), 6.0)
+        self.assertLess(_edge_turns(out).max(), roadmesh.DIRT_BEND_STEP_DEG + 0.5)
+
+    def test_a_right_turn_rounds_to_that_side(self):
+        src, half = _bend(-50)
+        out = roadmesh.round_dirt_centerline(src, half)
+        self.assertLess(out[:, 1].min(), -1.0)
+
+    def test_a_gentle_bend_is_left_on_the_mapped_line(self):
+        src, _half = _bend(6)
+        out = roadmesh.round_dirt_centerline(src, 1.75)
+        self.assertLess(np.hypot(out[:, 0] - 80, out[:, 1]).min(), 1e-6)
+        turns = _edge_turns(roadmesh.ribbons([_dirt(src)])[0][1])
+        self.assertEqual(int((turns > 2.0).sum()), 1)
+
+    def test_a_hairpin_on_a_short_arm_rounds_the_outside_edge(self):
+        src, half = _bend(130, arm=5.0)
+        out = roadmesh.round_dirt_centerline(src, half)
+        # too little arm for a wide arc: the point stays, and the ribbon fans the outside
+        self.assertLess(np.hypot(out[:, 0] - 5, out[:, 1]).min(), 0.05)
+        _left, right = roadmesh.ribbons([_dirt(out, 2 * half)])[0][:2]
+        self.assertLess(_edge_turns(right).max(), roadmesh.DIRT_BEND_STEP_DEG + 1.0)
+        self.assertLess(_edge_turns(_left).max(), 160.0)
+
+    def test_a_straight_strip_is_sampled_at_the_drape_step(self):
+        left, right = roadmesh.ribbons([_dirt([(0, 0, 0), (50, 0, 0)])])[0][:2]
+        mid = (left + right) / 2
+        step = np.hypot(*np.diff(mid, axis=0).T)
+        self.assertLessEqual(step.max(), roadmesh.DRAPE_STEP + 1e-6)
+        self.assertLess(np.abs(mid[:, 1]).max(), 1e-6)

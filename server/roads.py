@@ -6789,16 +6789,24 @@ def _surface_pieces(look, width, line, box):
     """Carriageway chunks of `line` clipped to box. A look with "aspect" (a dirt or gravel strip) carries s0 and s1,
     metres along `line` to the chunk's ends: the clipped piece's ends lie on `line`, and the chunk is placed by how
     far it sits along that piece, so the same point of the road has the same distance in every tile (roadmesh ribbons
-    turn that into v). Pure."""
+    turn that into v). A dirt or gravel strip's sharp bends are rounded on the whole simplified line first
+    (roadmesh.round_dirt_centerline, before the 12 m densify, which was leaving a corner only a few metres wide),
+    so every tile clips the same arc. That line is not simplified again and is not split at the old DecalRoad node
+    cap. Pure."""
+    line = np.asarray(line, np.float64)
+    rounded = bool(look.get("aspect")) and len(line) >= 2
+    if rounded:
+        import roadmesh
+        line = densify(roadmesh.round_dirt_centerline(simplify(line), float(width) / 2.0))
     arc = _arc_lengths(line) if look.get("aspect") else None
     out = []
     for piece in clip_polyline(line, *box):
         if arc is not None:
             base, end = _arc_at(line, arc, piece[0]), _arc_at(line, arc, piece[-1])
-        simp = densify(simplify(piece))
+        simp = piece if rounded else densify(simplify(piece))
         sal = _arc_lengths(simp) if arc is not None else None
         span = float(sal[-1]) if sal is not None else 0.0
-        for c in split(simp):
+        for c in split(simp, 4000 if rounded else MAX_NODES):
             if len(c) < 2:
                 continue
             ch = _chunk(look, width, c)
