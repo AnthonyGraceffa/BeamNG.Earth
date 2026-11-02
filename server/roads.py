@@ -99,6 +99,7 @@ BUILT = {"paved", "cobble"}
 # Copies of those strips (dirtroad.materials.json): the stock opacity maps are patchy, and vertex alpha
 # only tints the colour (it never changes opacity). Ours sample dirt_fade_o.data.png on UV1, which feathers
 # both sides (roadmesh EDGE_FADE_M) and fades a real end (END_FADE_M) without restarting at a tile edge.
+# opacityFactor 0.85: the solid middle lets the ground photo through; the feather still falls off from there.
 DIRT_VARIATIONS = ("bne_dirt_variation_01", "bne_dirt_variation_02",
                    "bne_dirt_variation_03", "bne_dirt_variation_04")
 LOOK = {
